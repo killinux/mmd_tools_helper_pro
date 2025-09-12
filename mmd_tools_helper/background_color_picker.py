@@ -1,90 +1,94 @@
-import bpy
+bl_info = {
+    "name": "MMD Background Color Picker",
+    "author": "Your Name",
+    "version": (1, 0),
+    "blender": (3, 6, 0),
+    "location": "View3D > Sidebar > mmd_tools_helper",
+    "description": "Sets world background color with contrasting text color",
+    "category": "MMD Tools",
+}
 
-# 定义场景属性（移至全局，便于正确注册和注销）
-bpy.types.Scene.BackgroundColor = bpy.props.FloatVectorProperty(
-    name="Background Color",
-    description="Set world background color",
-    default=(1.0, 1.0, 1.0),
-    min=0.0,
-    max=1.0,
-    subtype='COLOR',
-    size=3
-)
+import bpy
 
 class MMDBackgroundColorPicker_Panel(bpy.types.Panel):
     """Selects world background color and a contrasting text color"""
     bl_idname = "OBJECT_PT_mmd_background_color_picker"
-    bl_label = "MMD background color picker"
+    bl_label = "MMD Background Color Picker"
     bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"  # 适配Blender 2.8+的UI区域
-    bl_category = "mmd_tools_helper"  # 侧边栏分类
+    bl_region_type = "UI"
+    bl_category = "mmd_tools_helper"
 
     def draw(self, context):
         layout = self.layout
-        row = layout.row()
-
-        row = layout.row()
-        layout.prop(context.scene, "BackgroundColor")
-        row.operator("mmd_tools_helper.background_color_picker", 
-                    text="MMD background color picker")
-        row = layout.row()
-
-
-def main(context):
-    # 处理3D视图的世界显示设置
-    for screen in bpy.data.screens:
-        try:  # 添加错误处理，避免特定屏幕不存在时出错
-            for area in screen.areas:
-                if area.type == 'VIEW_3D':
-                    for space in area.spaces:
-                        if space.type == 'VIEW_3D':
-                            space.show_world = True
-        except Exception as e:
-            print(f"处理屏幕 {screen.name} 时出错: {e}")
-
-    # 设置世界背景颜色
-    if context.scene.world is None:
-        # 如果没有世界环境，创建一个
-        context.scene.world = bpy.data.worlds.new("World")
-    context.scene.world.node_tree.nodes["Background"].inputs[0].default_value = (
-        context.scene.BackgroundColor[0],
-        context.scene.BackgroundColor[1],
-        context.scene.BackgroundColor[2],
-        1.0  # Alpha通道
-    )
-
-    # 计算对比文本颜色（确保可读性）
-    bg_r, bg_g, bg_b = context.scene.BackgroundColor
-    text_r = 1.0 - bg_r
-    text_g = 1.0 - bg_g
-    text_b = 1.0 - bg_b
-
-    # 设置3D视图文本颜色（适配Blender 2.8+的API）
-    context.preferences.themes[0].view_3d.text_hi = (text_r, text_g, text_b, 1.0)
+        
+        # 添加颜色属性控件
+        layout.prop(context.scene, "mmd_background_color")
+        
+        # 添加操作按钮
+        layout.operator("mmd_tools_helper.background_color_picker", 
+                      text="Apply Background Color")
 
 
 class MMDBackgroundColorPicker(bpy.types.Operator):
-    """Selects world background color and a contrasting text color"""
+    """Sets world background color and contrasting text color"""
     bl_idname = "mmd_tools_helper.background_color_picker"
-    bl_label = "MMD background color picker"
-    bl_options = {'REGISTER', 'UNDO'}  # 支持撤销操作
+    bl_label = "Apply MMD Background Color"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        main(context)
-        self.report({'INFO'}, "Background color updated successfully")  # 操作反馈
+        # 确保世界环境存在
+        if not context.scene.world:
+            context.scene.world = bpy.data.worlds.new("World")
+        
+        # 确保世界环境使用节点
+        if not context.scene.world.use_nodes:
+            context.scene.world.use_nodes = True
+        
+        # 获取背景节点并设置颜色
+        nodes = context.scene.world.node_tree.nodes
+        background_node = nodes.get("Background")
+        if background_node:
+            # Blender 3.6 中背景颜色是第一个输入
+            bg_color = context.scene.mmd_background_color
+            background_node.inputs[0].default_value = (bg_color[0], bg_color[1], bg_color[2], 1.0)
+        
+        # 计算对比文本颜色
+        bg_r, bg_g, bg_b = context.scene.mmd_background_color
+        text_r = 1.0 - bg_r
+        text_g = 1.0 - bg_g
+        text_b = 1.0 - bg_b
+        
+        # 设置3D视图文本颜色
+        context.preferences.themes[0].view_3d.text = (text_r, text_g, text_b, 1.0)
+        context.preferences.themes[0].view_3d.text_hi = (text_r, text_g, text_b, 1.0)
+        
+        self.report({'INFO'}, "Background color updated successfully")
         return {'FINISHED'}
 
 
 def register():
-    bpy.utils.register_class(MMDBackgroundColorPicker)
+    # 在注册时定义属性（Blender 3.x 推荐方式）
+    bpy.types.Scene.mmd_background_color = bpy.props.FloatVectorProperty(
+        name="Background Color",
+        description="Set world background color",
+        default=(0.1, 0.1, 0.1),  # 深色默认值更符合MMD风格
+        min=0.0,
+        max=1.0,
+        subtype='COLOR',
+        size=3
+    )
+    
     bpy.utils.register_class(MMDBackgroundColorPicker_Panel)
+    bpy.utils.register_class(MMDBackgroundColorPicker)
 
 
 def unregister():
-    bpy.utils.unregister_class(MMDBackgroundColorPicker)
     bpy.utils.unregister_class(MMDBackgroundColorPicker_Panel)
-    # 清理场景属性
-    del bpy.types.Scene.BackgroundColor
+    bpy.utils.unregister_class(MMDBackgroundColorPicker)
+    
+    # 安全删除属性
+    if hasattr(bpy.types.Scene, "mmd_background_color"):
+        del bpy.types.Scene.mmd_background_color
 
 
 if __name__ == "__main__":

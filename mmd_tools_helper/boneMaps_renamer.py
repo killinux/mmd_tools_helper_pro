@@ -1,346 +1,366 @@
+bl_info = {
+    "name": "MMD Bones Renamer Helper",
+    "author": "Hogarth-MMD (Adapted for Blender 3.6)",
+    "version": (1, 1, 0),
+    "blender": (3, 6, 0),
+    "location": "View3D > Sidebar > mmd_tools_helper",
+    "description": "Batch renames armature bones between MMD/3ds Max/Rigify/Sims etc. types",
+    "warning": "Requires 'model.py' and 'import_csv.py' in the same folder",
+    "category": "MMD Tools",
+    "support": "COMMUNITY"
+}
+
 import bpy
-from . import model  # 依赖外部 model 模块（需确保该模块存在）
-from . import import_csv  # 依赖外部 CSV 骨骼字典模块（需确保该模块存在）
-print("---bonesMaps_renamer---")
+
+# --------------------------
+# 依赖模块容错导入
+# --------------------------
+try:
+    from . import model
+    from . import import_csv
+    DEPENDENCIES_LOADED = True
+    print("--- MMD Bones Renamer: Dependencies loaded ---")
+except ImportError as e:
+    DEPENDENCIES_LOADED = False
+    MISSING_MODULE = str(e).split("'")[1] if "'" in str(e) else "Unknown"
+    print(f"--- MMD Bones Renamer: ERROR - Missing module: {MISSING_MODULE} ---")
 
 
-# 骨骼重命名面板（显示在 3D 视图右侧属性栏）
+# --------------------------
+# 辅助工具函数
+# --------------------------
+def use_international_fonts_display_names_bones():
+    """启用国际字体+显示骨骼名称"""
+    bpy.context.preferences.system.use_international_fonts = True
+    if bpy.context.object and bpy.context.object.type == 'ARMATURE':
+        bpy.context.object.data.show_names = True
+        print("Enabled international fonts and bone name display")
+
+
+def unhide_all_armatures():
+    """显示所有骨架"""
+    for obj in bpy.context.scene.objects:
+        if obj.type == 'ARMATURE' and (obj.hide_viewport or obj.hide_render):
+            obj.hide_viewport = False
+            obj.hide_render = False
+            print(f"Unhidden armature: {obj.name}")
+
+
+def print_missing_bone_names():
+    """检测并打印缺失骨骼"""
+    if not DEPENDENCIES_LOADED:
+        print("Cannot check missing bones: Dependencies not loaded")
+        return
+
+    missing_bones = []
+    try:
+        main_bone_dict = import_csv.use_csv_bones_dictionary()
+        finger_bone_dict = import_csv.use_csv_bones_fingers_dictionary()
+    except Exception as e:
+        print(f"Failed to load bone dictionaries: {str(e)}")
+        return
+
+    if not (main_bone_dict and finger_bone_dict and len(main_bone_dict) > 0 and len(finger_bone_dict) > 0):
+        print("Bone dictionaries are empty or invalid")
+        return
+
+    target_bone_type = bpy.context.scene.Destination_Armature_Type
+    if target_bone_type not in main_bone_dict[0] or target_bone_type not in finger_bone_dict[0]:
+        print(f"Target bone type '{target_bone_type}' not found in dictionaries")
+        return
+
+    main_idx = main_bone_dict[0].index(target_bone_type)
+    finger_idx = finger_bone_dict[0].index(target_bone_type)
+
+    try:
+        target_armature = model.findArmature(bpy.context.active_object)
+    except Exception as e:
+        print(f"Failed to find armature: {str(e)}")
+        return
+
+    if not target_armature or target_armature.type != 'ARMATURE':
+        print("No valid armature selected")
+        return
+
+    # 检查主体骨骼
+    for bone_entry in main_bone_dict[1:]:
+        target_bone_name = bone_entry[main_idx]
+        if (target_bone_name 
+            and target_bone_name not in ["", "upper body 2", "上半身2"]
+            and target_bone_name not in target_armature.data.bones):
+            missing_bones.append(target_bone_name)
+
+    # 检查手指骨骼
+    for bone_entry in finger_bone_dict[1:]:
+        target_bone_name = bone_entry[finger_idx]
+        if (target_bone_name 
+            and target_bone_name not in ["", "thumb0_L", "thumb0_R", "左親指0", "親指0.L", "右親指0", "親指0.R"]
+            and target_bone_name not in target_armature.data.bones):
+            missing_bones.append(target_bone_name)
+
+    # 打印报告
+    print("\n" + "="*50)
+    print(f"Missing Bones Report (Target: {target_bone_type})")
+    print(f"Armature: {target_armature.name}")
+    print(f"Total missing bones: {len(missing_bones)}")
+    if missing_bones:
+        for bone in sorted(missing_bones):
+            print(f" - {bone}")
+    else:
+        print(" ✅ No missing bones")
+    print("="*50 + "\n")
+
+
+# --------------------------
+# 核心骨骼重命名函数
+# --------------------------
+def rename_bones(source_type, target_type, bone_dictionary, is_finger=False):
+    """批量重命名骨骼"""
+    if not DEPENDENCIES_LOADED:
+        print("Cannot rename bones: Dependencies not loaded")
+        return
+
+    if not bone_dictionary or len(bone_dictionary) < 2:
+        print(f"Invalid {('finger ' if is_finger else '')}bone dictionary")
+        return
+
+    dict_headers = bone_dictionary[0]
+    if source_type not in dict_headers or target_type not in dict_headers:
+        print(f"Source '{source_type}' or Target '{target_type}' not in dictionary")
+        return
+
+    source_idx = dict_headers.index(source_type)
+    target_idx = dict_headers.index(target_type)
+
+    target_armature = bpy.context.active_object
+    if not target_armature or target_armature.type != 'ARMATURE':
+        print("Active object is not an armature")
+        return
+
+    # 切换到对象模式
+    if target_armature.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception as e:
+            print(f"Failed to switch to Object mode: {str(e)}")
+            return
+
+    # 执行重命名
+    renamed_count = 0
+    for bone_entry in bone_dictionary[1:]:
+        source_bone = bone_entry[source_idx]
+        target_bone = bone_entry[target_idx]
+
+        if source_bone and target_bone and source_bone in target_armature.data.bones:
+            if target_armature.data.bones[source_bone].name != target_bone:
+                target_armature.data.bones[source_bone].name = target_bone
+                renamed_count += 1
+
+                # 同步 MMD 骨骼属性（需安装 mmd_tools）
+                if target_type in ['mmd_japanese', 'mmd_japaneseLR']:
+                    try:
+                        bpy.ops.object.mode_set(mode='POSE')
+                        if target_bone in target_armature.pose.bones:
+                            pose_bone = target_armature.pose.bones[target_bone]
+                            if hasattr(pose_bone, "mmd_bone"):
+                                pose_bone.mmd_bone.name_e = bone_entry[0]
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                    except Exception as e:
+                        print(f"Failed to sync mmd_bone: {str(e)}")
+                        bpy.ops.object.mode_set(mode='OBJECT')
+
+    print(f"Renamed {renamed_count} {('finger ' if is_finger else '')}bones")
+
+
+def main():
+    """主逻辑"""
+    if not DEPENDENCIES_LOADED:
+        return {"error": f"Missing dependencies: {MISSING_MODULE}"}
+
+    # 查找骨架
+    try:
+        target_armature = model.findArmature(bpy.context.active_object)
+    except Exception as e:
+        return {"error": f"Find armature failed: {str(e)}"}
+
+    if not target_armature:
+        return {"error": "No armature associated with selected object"}
+
+    bpy.context.view_layer.objects.active = target_armature
+    print(f"Active armature: {target_armature.name}")
+
+    # 辅助设置
+    use_international_fonts_display_names_bones()
+    unhide_all_armatures()
+
+    # 读取字典
+    try:
+        main_bones = import_csv.use_csv_bones_dictionary()
+        finger_bones = import_csv.use_csv_bones_fingers_dictionary()
+    except Exception as e:
+        return {"error": f"Load bone dictionaries failed: {str(e)}"}
+
+    # 执行重命名
+    source_type = bpy.context.scene.Origin_Armature_Type
+    target_type = bpy.context.scene.Destination_Armature_Type
+    rename_bones(source_type, target_type, main_bones, is_finger=False)
+    rename_bones(source_type, target_type, finger_bones, is_finger=True)
+
+    # 检测缺失骨骼
+    print_missing_bone_names()
+
+    # 切换到姿态模式
+    try:
+        bpy.ops.object.mode_set(mode='POSE')
+        bpy.ops.pose.select_all(action='SELECT')
+    except Exception as e:
+        return {"warning": f"Switch to Pose mode failed: {str(e)}"}
+
+    return {"success": "Bone renaming completed"}
+
+
+# --------------------------
+# UI 面板与操作器
+# --------------------------
 class BonesRenamerPanel_MTH(bpy.types.Panel):
-    """Creates the Bones Renamer Panel in a VIEW_3D UI tab"""
-    bl_label = "Bones Renamer"
+    bl_label = "MMD Bones Renamer"
     bl_idname = "OBJECT_PT_bones_renamer_MTH"
     bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"  # Blender 2.8+ 移除 "TOOLS" 区域，改用右侧 "UI" 区域
-    bl_category = "mmd_tools_helper"  # 面板归类到 "mmd_tools_helper" 标签页
+    bl_region_type = "UI"
+    bl_category = "mmd_tools_helper"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        self.layout.label(text="", icon="ARMATURE_DATA")
 
     def draw(self, context):
         layout = self.layout
-        row = layout.row()
+        col = layout.column(align=True)
 
-        row.label(text="Mass Rename Bones", icon="ARMATURE_DATA")
-        row = layout.row()
-        row = layout.row()
-        
-        # 源骨骼类型选择（从场景属性读取）
-        layout.prop(context.scene, "Origin_Armature_Type")
-        row = layout.row()
-        
-        # 目标骨骼类型选择（从场景属性读取）
-        layout.prop(context.scene, "Destination_Armature_Type")
-        row = layout.row()
-        
-        # 触发重命名的按钮
-        row.operator("object.bones_renamer", text="Mass Rename Bones")
-        row = layout.row()
+        # 依赖缺失提示
+        if not DEPENDENCIES_LOADED:
+            col.label(text="❌ Missing Dependencies!", icon='ERROR')
+            col.label(text=f"Need: {MISSING_MODULE}.py")
+            col.label(text="Place in same folder as main script")
+            return
 
+        # 源/目标骨骼类型选择
+        col.label(text="From Bone Type:", icon='EXPORT')
+        col.prop(context.scene, "Origin_Armature_Type", text="")
+        col.separator()
 
-# 启用国际字体并显示骨骼名称（适配 Blender 3.6）
-def use_international_fonts_display_names_bones():
-    # Blender 2.8+ 移除 user_preferences，改用 preferences
-    #bpy.context.preferences.system.use_international_fonts = True
-    # 确保当前对象是骨架，避免属性不存在错误
-    if bpy.context.object and bpy.context.object.type == 'ARMATURE':
-        bpy.context.object.data.show_names = True
+        col.label(text="To Bone Type:", icon='IMPORT')
+        col.prop(context.scene, "Destination_Armature_Type", text="")
+        col.separator()
 
+        # 重命名按钮（仅选中骨架时可用）
+        row = col.row()
+        row.enabled = (context.active_object and context.active_object.type in ['ARMATURE', 'MESH'])
+        row.operator("object.mmd_bones_renamer", text="Batch Rename Bones", icon='FILE_REFRESH')
 
-# 显示所有骨架（修复 Blender 3.6 隐藏属性）
-def unhide_all_armatures():
-    for o in bpy.context.scene.objects:
-        if o.type == 'ARMATURE':
-            # Blender 2.8+ 移除 o.hide，拆分为视图隐藏和渲染隐藏
-            o.hide_viewport = False  # 视图中显示骨架
-            o.hide_render = False    # 渲染时显示骨架
+        # 提示
+        col.label(text="ℹ️ Check Console for Missing Bones", icon='INFO')
 
 
-# 打印缺失的骨骼名称（用于调试）
-def print_missing_bone_names():
-    missing_bone_names = []
-    # 从 CSV 模块获取骨骼字典（需确保 CSV 模块正常读取）
-    BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_dictionary()
-    FINGER_BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_fingers_dictionary()
-    
-    # 容错：避免字典为空导致崩溃
-    if not BONE_NAMES_DICTIONARY or not FINGER_BONE_NAMES_DICTIONARY:
-        print("Error: Bone dictionary is empty (check CSV import module)")
-        return
-    
-    # 获取目标骨骼映射类型
-    SelectedBoneMap = bpy.context.scene.Destination_Armature_Type
-    # 容错：检查目标映射是否在字典中
-    if SelectedBoneMap not in BONE_NAMES_DICTIONARY[0] or SelectedBoneMap not in FINGER_BONE_NAMES_DICTIONARY[0]:
-        print(f"Error: Bone map '{SelectedBoneMap}' not found in dictionary")
-        return
-    
-    # 计算目标骨骼在字典中的索引
-    BoneMapIndex = BONE_NAMES_DICTIONARY[0].index(SelectedBoneMap)
-    FingerBoneMapIndex = FINGER_BONE_NAMES_DICTIONARY[0].index(SelectedBoneMap)
-    
-    # 找到并激活目标骨架（依赖 model 模块的 findArmature 函数）
-    target_armature = model.findArmature(bpy.context.active_object)
-    if not target_armature:
-        print("Error: No armature found for active object")
-        return
-    # Blender 2.8+ 活动对象设置改用 view_layer.objects.active
-    bpy.context.view_layer.objects.active = target_armature
-    
-    # 检查主体骨骼是否缺失
-    for b in BONE_NAMES_DICTIONARY:
-        b_idx = BONE_NAMES_DICTIONARY.index(b)
-        if b_idx != 0 and b[BoneMapIndex] != '' and b[BoneMapIndex] not in ["upper body 2", "上半身2"]:
-            if b[BoneMapIndex] not in target_armature.data.bones.keys():
-                missing_bone_names.append(b[BoneMapIndex])
-    
-    # 检查手指骨骼是否缺失
-    for b in FINGER_BONE_NAMES_DICTIONARY:
-        b_idx = FINGER_BONE_NAMES_DICTIONARY.index(b)
-        if b_idx != 0 and b[FingerBoneMapIndex] != '' and b[FingerBoneMapIndex] not in ["thumb0_L", "thumb0_R", "左親指0", "親指0.L", "右親指0", "親指0.R"]:
-            if b[FingerBoneMapIndex] not in target_armature.data.bones.keys():
-                missing_bone_names.append(b[FingerBoneMapIndex])
-    
-    # 打印结果（控制台输出）
-    print("\n=== Missing Bones Report ===")
-    print(f"Destination bone map: {SelectedBoneMap}")
-    print(f"Missing bones in active armature:")
-    if missing_bone_names:
-        for bone in missing_bone_names:
-            print(f"- {bone}")
-    else:
-        print("None (all required bones exist)")
-    print("===========================")
+class MMD_Bones_Renamer(bpy.types.Operator):
+    bl_idname = "object.mmd_bones_renamer"
+    bl_label = "Batch Rename Bones"
+    bl_description = "Rename bones between selected types"
+    bl_options = {'REGISTER', 'UNDO'}
 
-
-# 重命名主体骨骼（核心功能）
-def rename_bones(boneMap1, boneMap2, BONE_NAMES_DICTIONARY): 
-    # 容错：避免字典为空
-    if not BONE_NAMES_DICTIONARY:
-        print("Error: Main bone dictionary is empty")
-        return
-    
-    boneMaps = BONE_NAMES_DICTIONARY[0]
-    # 容错：检查源/目标映射是否有效
-    if boneMap1 not in boneMaps or boneMap2 not in boneMaps:
-        print(f"Error: Bone map '{boneMap1}' (source) or '{boneMap2}' (target) not found")
-        return
-    
-    # 获取源/目标骨骼在字典中的索引
-    boneMap1_index = boneMaps.index(boneMap1)
-    boneMap2_index = boneMaps.index(boneMap2)
-    
-    # 切换到对象模式（避免编辑/姿态模式下的重命名错误）
-    if bpy.context.active_object.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # 确认当前对象是骨架
-    target_armature = bpy.context.active_object
-    if target_armature.type != 'ARMATURE':
-        print("Error: Active object is not an armature")
-        return
-    
-    # 遍历字典并重命名骨骼
-    for k in BONE_NAMES_DICTIONARY[1:]:
-        src_bone_name = k[boneMap1_index]  # 源骨骼名称
-        dst_bone_name = k[boneMap2_index]  # 目标骨骼名称
-        # 仅当源骨骼存在且目标名称非空时重命名
-        if src_bone_name in target_armature.data.bones.keys() and dst_bone_name != '':
-            target_armature.data.bones[src_bone_name].name = dst_bone_name
-            # 若目标是 MMD 日语骨骼，同步 mmd_bone 属性（需安装 mmd_tools 插件）
-            if boneMap2 in ['mmd_japanese', 'mmd_japaneseLR']:
-                bpy.ops.object.mode_set(mode='POSE')
-                if dst_bone_name in target_armature.pose.bones and hasattr(target_armature.pose.bones[dst_bone_name], "mmd_bone"):
-                    target_armature.pose.bones[dst_bone_name].mmd_bone.name_e = k[0]
-                bpy.ops.object.mode_set(mode='OBJECT')
-
-
-# 重命名手指骨骼（核心功能）
-def rename_finger_bones(boneMap1, boneMap2, FINGER_BONE_NAMES_DICTIONARY):
-    # 容错：避免字典为空
-    if not FINGER_BONE_NAMES_DICTIONARY:
-        print("Error: Finger bone dictionary is empty")
-        return
-    
-    boneMaps = FINGER_BONE_NAMES_DICTIONARY[0]
-    # 容错：检查源/目标映射是否有效
-    if boneMap1 not in boneMaps or boneMap2 not in boneMaps:
-        print(f"Error: Finger bone map '{boneMap1}' (source) or '{boneMap2}' (target) not found")
-        return
-    
-    # 获取源/目标骨骼在字典中的索引
-    boneMap1_index = boneMaps.index(boneMap1)
-    boneMap2_index = boneMaps.index(boneMap2)
-    
-    # 切换到对象模式
-    if bpy.context.active_object.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # 确认当前对象是骨架
-    target_armature = bpy.context.active_object
-    if target_armature.type != 'ARMATURE':
-        print("Error: Active object is not an armature")
-        return
-    
-    # 遍历手指骨骼字典并重命名
-    for k in FINGER_BONE_NAMES_DICTIONARY[1:]:
-        src_bone_name = k[boneMap1_index]  # 源手指骨骼名称
-        dst_bone_name = k[boneMap2_index]  # 目标手指骨骼名称
-        # 仅当源骨骼存在且目标名称非空时重命名
-        if src_bone_name in target_armature.data.bones.keys() and dst_bone_name != '':
-            target_armature.data.bones[src_bone_name].name = dst_bone_name
-            # 若目标是 MMD 日语骨骼，同步 mmd_bone 属性
-            if boneMap2 in ['mmd_japanese', 'mmd_japaneseLR']:
-                bpy.ops.object.mode_set(mode='POSE')
-                if dst_bone_name in target_armature.pose.bones and hasattr(target_armature.pose.bones[dst_bone_name], "mmd_bone"):
-                    target_armature.pose.bones[dst_bone_name].mmd_bone.name_e = k[0]
-                bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # 更新源骨骼类型为当前目标类型（方便后续二次重命名）
-    bpy.context.scene.Origin_Armature_Type = boneMap2
-    # 打印缺失骨骼报告
-    print_missing_bone_names()
-
-
-# 主逻辑函数（串联所有功能）
-def main(context):
-    # 1. 找到并激活目标骨架（依赖 model 模块的 findArmature 函数）
-    target_armature = model.findArmature(bpy.context.active_object)
-    if not target_armature:
-        print("Error: No armature associated with active object")
-        return
-    bpy.context.view_layer.objects.active = target_armature
-    
-    # 2. 启用国际字体 + 显示骨骼名称
-    use_international_fonts_display_names_bones()
-    
-    # 3. 显示所有骨架（避免隐藏导致的重命名遗漏）
-    unhide_all_armatures()
-    
-    # 4. 从 CSV 模块获取骨骼字典
-    BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_dictionary()
-    FINGER_BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_fingers_dictionary()
-    
-    # 5. 执行主体骨骼重命名
-    rename_bones(
-        bpy.context.scene.Origin_Armature_Type,  # 源骨骼类型（用户选择）
-        bpy.context.scene.Destination_Armature_Type,  # 目标骨骼类型（用户选择）
-        BONE_NAMES_DICTIONARY
-    )
-    
-    # 6. 执行手指骨骼重命名
-    rename_finger_bones(
-        bpy.context.scene.Origin_Armature_Type,
-        bpy.context.scene.Destination_Armature_Type,
-        FINGER_BONE_NAMES_DICTIONARY
-    )
-    
-    # 7. 切换到姿态模式并全选骨骼（方便后续操作）
-    bpy.ops.object.mode_set(mode='POSE')
-    bpy.ops.pose.select_all(action='SELECT')
-
-
-# 骨骼重命名操作器（点击按钮触发）
-class BonesRenamer(bpy.types.Operator):
-    """Mass bones renamer for armature conversion (supports Blender 3.6)"""
-    bl_idname = "object.bones_renamer"
-    bl_label = "Bones Renamer"
-    bl_options = {'REGISTER', 'UNDO'}  # 支持 Blender 撤销功能（3.6 必需显式声明）
+    @classmethod
+    def poll(cls, context):
+        return DEPENDENCIES_LOADED and context.active_object is not None
 
     def execute(self, context):
-        # 前置检查：确保有活动对象
-        if not bpy.context.active_object:
-            self.report({'ERROR'}, "No active object found! Please select a model/armature first.")
+        result = main()
+        if "error" in result:
+            self.report({'ERROR'}, result["error"])
             return {'CANCELLED'}
-        
-        # 前置检查：确保活动对象关联骨架（依赖 model 模块）
-        if not model.findArmature(bpy.context.active_object):
-            self.report({'ERROR'}, "No armature found for the selected object!")
-            return {'CANCELLED'}
-        
-        # 执行主逻辑
-        main(context)
-        self.report({'INFO'}, "Bone renaming completed! Check console for missing bones report.")
+        elif "warning" in result:
+            self.report({'WARNING'}, result["warning"])
+        else:
+            self.report({'INFO'}, "✅ Bone renaming done! Check console")
         return {'FINISHED'}
 
 
-# 注册场景属性（源/目标骨骼类型枚举，Blender 3.6 需单独注册）
+# --------------------------
+# 场景属性注册
+# --------------------------
 def register_scene_properties():
-    # 1. 源骨骼类型枚举（用户选择“从哪种骨骼类型开始重命名”）
+    bone_type_items = [
+        ('mmd_english', 'MMD English', 'MMD 英文骨骼（Hips/Spine）'),
+        ('mmd_japanese', 'MMD Japanese', 'MMD 日文骨骼（骨盤/背骨）'),
+        ('mmd_japaneseLR', 'MMD Japanese (.L.R)', 'MMD 日文（带 .L/.R）'),
+        ('xna_lara', 'XNALara', 'XNALara 骨骼'),
+        ('daz_poser', 'DAZ/Poser', 'DAZ/Poser 骨骼'),
+        ('blender_rigify', 'Blender Rigify', 'Rigify 预绑定骨骼'),
+        ('sims_2', 'Sims 2', '模拟人生 2 骨骼'),
+        ('motion_builder', 'Motion Builder', 'Motion Builder 骨骼'),
+        ('3ds_max', '3ds Max', '3ds Max 标准骨骼'),
+        ('bepu', 'Bepu IK', 'Bepu 全身 IK 骨骼'),
+        ('project_mirai', 'Project Mirai', '初音未来：未来计划'),
+        ('manuel_bastioni_lab', 'Manuel Bastioni Lab', 'MBL 骨骼'),
+        ('makehuman_mhx', 'Makehuman MHX', 'MakeHuman MHX 骨骼'),
+        ('sims_3', 'Sims 3', '模拟人生 3 骨骼'),
+        ('doa5lr', 'DOA5LR', '死或生 5 骨骼'),
+        ('Bip_001', 'Bip001', '标准 Bip001（UE/Unity）'),
+        ('biped_3ds_max', 'Biped (3DS Max)', '3ds Max Biped'),
+        ('biped_sfm', 'Biped (SFM)', 'SFM Biped 骨骼'),
+        ('valvebiped', 'ValveBiped', 'Valve 骨骼（TF2/CS:GO）'),
+        ('iClone7', 'iClone7', 'iClone7 骨骼')
+    ]
+
+    # 源骨骼类型
     bpy.types.Scene.Origin_Armature_Type = bpy.props.EnumProperty(
-        items=[
-            ('mmd_english', 'MMD English', 'MikuMikuDance English bone names'),
-            ('mmd_japanese', 'MMD Japanese', 'MikuMikuDance Japanese bone names'),
-            ('mmd_japaneseLR', 'MMD Japanese (.L.R)', 'MMD Japanese bones with .L/.R suffixes'),
-            ('xna_lara', 'XNALara', 'XNALara bone names'),
-            ('daz_poser', 'DAZ/Poser', 'DAZ/Poser/Second Life bone names'),
-            ('blender_rigify', 'Blender Rigify', 'Blender Rigify pre-rig bone names'),
-            ('sims_2', 'Sims 2', 'Sims 2 bone names'),
-            ('motion_builder', 'Motion Builder', 'Motion Builder bone names'),
-            ('3ds_max', '3ds Max', '3ds Max bone names'),
-            ('bepu', 'Bepu IK', 'Bepu full body IK bone names'),
-            ('project_mirai', 'Project Mirai', 'Project Mirai bone names'),
-            ('manuel_bastioni_lab', 'Manuel Bastioni Lab', 'Manuel Bastioni Lab bone names'),
-            ('makehuman_mhx', 'Makehuman MHX', 'Makehuman MHX bone names'),
-            ('sims_3', 'Sims 3', 'Sims 3 bone names'),
-            ('doa5lr', 'DOA5LR', 'Dead or Alive 5 Last Round bone names'),
-            ('Bip_001', 'Bip001', 'Bip001 standard bone names'),
-            ('biped_3ds_max', 'Biped (3DS Max)', '3DS Max Biped bone names'),
-            ('biped_sfm', 'Biped (SFM)', 'Source Film Maker Biped bone names'),
-            ('valvebiped', 'ValveBiped', 'ValveBiped (e.g. TF2) bone names'),
-            ('iClone7', 'iClone7', 'iClone7 bone names')
-        ],
-        name="From Bone Type",  # UI 显示的标签
-        default='mmd_japanese'  # 默认选择 MMD 日语骨骼
+        items=bone_type_items,
+        name="From",
+        default='mmd_japanese',
+        description="Original bone type of your armature"
     )
 
-    # 2. 目标骨骼类型枚举（用户选择“重命名到哪种骨骼类型”）
+    # 目标骨骼类型
     bpy.types.Scene.Destination_Armature_Type = bpy.props.EnumProperty(
-        items=[
-            ('mmd_english', 'MMD English', 'MikuMikuDance English bone names'),
-            ('mmd_japanese', 'MMD Japanese', 'MikuMikuDance Japanese bone names'),
-            ('mmd_japaneseLR', 'MMD Japanese (.L.R)', 'MMD Japanese bones with .L/.R suffixes'),
-            ('xna_lara', 'XNALara', 'XNALara bone names'),
-            ('daz_poser', 'DAZ/Poser', 'DAZ/Poser/Second Life bone names'),
-            ('blender_rigify', 'Blender Rigify', 'Blender Rigify pre-rig bone names'),
-            ('sims_2', 'Sims 2', 'Sims 2 bone names'),
-            ('motion_builder', 'Motion Builder', 'Motion Builder bone names'),
-            ('3ds_max', '3ds Max', '3ds Max bone names'),
-            ('bepu', 'Bepu IK', 'Bepu full body IK bone names'),
-            ('project_mirai', 'Project Mirai', 'Project Mirai bone names'),
-            ('manuel_bastioni_lab', 'Manuel Bastioni Lab', 'Manuel Bastioni Lab bone names'),
-            ('makehuman_mhx', 'Makehuman MHX', 'Makehuman MHX bone names'),
-            ('sims_3', 'Sims 3', 'Sims 3 bone names'),
-            ('doa5lr', 'DOA5LR', 'Dead or Alive 5 Last Round bone names'),
-            ('Bip_001', 'Bip001', 'Bip001 standard bone names'),
-            ('biped_3ds_max', 'Biped (3DS Max)', '3DS Max Biped bone names'),
-            ('biped_sfm', 'Biped (SFM)', 'Source Film Maker Biped bone names'),
-            ('valvebiped', 'ValveBiped', 'ValveBiped (e.g. TF2) bone names'),
-            ('iClone7', 'iClone7', 'iClone7 bone names')
-        ],
-        name="To Bone Type",  # UI 显示的标签
-        default='mmd_english'  # 默认目标为 MMD 英语骨骼
+        items=bone_type_items,
+        name="To",
+        default='mmd_english',
+        description="Target bone type to rename to"
     )
 
 
-# 注册函数（Blender 插件必需的注册逻辑）
+# --------------------------
+# 插件注册/注销
+# --------------------------
 def register():
-    # 1. 先注册场景属性（避免面板读取属性时报错）
-    register_scene_properties()
-    # 2. 注册面板和操作器
-    bpy.utils.register_class(BonesRenamerPanel_MTH)
-    bpy.utils.register_class(BonesRenamer)
-    print("Bones Renamer tool registered (Blender 3.6 compatible)")
+    try:
+        register_scene_properties()
+    except Exception as e:
+        print(f"Failed to register properties: {str(e)}")
+
+    try:
+        bpy.utils.register_class(BonesRenamerPanel_MTH)
+        bpy.utils.register_class(MMD_Bones_Renamer)
+        print("✅ MMD Bones Renamer registered (Blender 3.6)")
+    except Exception as e:
+        print(f"❌ Failed to register classes: {str(e)}")
 
 
-# 注销函数（插件卸载时清理）
 def unregister():
-    # 1. 注销操作器和面板
-    bpy.utils.unregister_class(BonesRenamer)
-    bpy.utils.unregister_class(BonesRenamerPanel_MTH)
-    # 2. 移除场景属性（避免残留）
-    del bpy.types.Scene.Origin_Armature_Type
-    del bpy.types.Scene.Destination_Armature_Type
-    print("Bones Renamer tool unregistered")
+    try:
+        bpy.utils.unregister_class(MMD_Bones_Renamer)
+        bpy.utils.unregister_class(BonesRenamerPanel_MTH)
+    except Exception as e:
+        print(f"Warning: Unregister classes failed: {str(e)}")
+
+    try:
+        if hasattr(bpy.types.Scene, "Origin_Armature_Type"):
+            del bpy.types.Scene.Origin_Armature_Type
+        if hasattr(bpy.types.Scene, "Destination_Armature_Type"):
+            del bpy.types.Scene.Destination_Armature_Type
+        print("✅ MMD Bones Renamer unregistered")
+    except Exception as e:
+        print(f"Warning: Delete properties failed: {str(e)}")
 
 
-# 直接运行时注册（用于测试）
 if __name__ == "__main__":
     register()
-#register()   

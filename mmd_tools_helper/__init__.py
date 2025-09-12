@@ -19,7 +19,7 @@ class MMDToolsHelperPanel(bpy.types.Panel):
     bl_idname = "OBJECT_PT_mmd_tools_helper"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"  # Blender 2.8+使用UI替代TOOLS
-    bl_category = "MMD Tools Helper"  # 侧边栏中的标签名称
+    bl_category = "mmd_tools_helper"  # 侧边栏中的标签名称
 
     def draw(self, context):
         print("init--draw")
