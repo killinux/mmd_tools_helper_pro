@@ -409,4 +409,4 @@ def unregister():
 # 仅在直接运行脚本时注册（避免导入时重复注册）
 if __name__ == "__main__":
     register()
-register()
+#register()

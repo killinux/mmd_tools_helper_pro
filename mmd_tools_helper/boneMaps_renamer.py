@@ -343,4 +343,4 @@ def unregister():
 # 直接运行时注册（用于测试）
 if __name__ == "__main__":
     register()
-register()   
+#register()   

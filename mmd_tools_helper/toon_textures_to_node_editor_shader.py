@@ -1,290 +1,310 @@
 import bpy
 from . import model
 
+# ------------------------------
+# 1. 卡通纹理转颜色梯度工具函数
+# ------------------------------
+def toon_image_to_color_ramp(toon_color_ramp_node, toon_image):
+    """从卡通纹理图像提取颜色信息并配置ColorRamp节点"""
+    if not toon_image or not toon_image.pixels:
+        raise Warning("卡通纹理图像无效或为空")
 
-# Each image is a list of numbers(floats): R,G,B,A,R,G,B,A etc.
-# So the length of the list of pixels is 4 X number of pixels
-# pixels are in left-to-right rows from bottom left to top right of image
+    # 提取像素数据（每4个值为一个RGBA像素）
+    pixel_list = []
+    for i in range(0, len(toon_image.pixels), 4):
+        rgba = toon_image.pixels[i:i+4]
+        pixel_list.append(rgba)
 
+    # 采样32个梯度点（平衡精度与性能）
+    sample_count = 32
+    step = max(1, len(pixel_list) // sample_count)
+    gradient_samples = [pixel_list[i] for i in range(0, len(pixel_list), step)]
+    
+    # 确保至少有2个采样点（ColorRamp需要首尾）
+    if len(gradient_samples) < 2:
+        gradient_samples = [pixel_list[0], pixel_list[-1]]
+
+    # 清除现有中间控制点（保留首尾）
+    while len(toon_color_ramp_node.color_ramp.elements) > 2:
+        toon_color_ramp_node.color_ramp.elements.remove(
+            toon_color_ramp_node.color_ramp.elements[1]
+        )
+
+    # 设置首尾颜色
+    toon_color_ramp_node.color_ramp.elements[0].color = gradient_samples[0]
+    toon_color_ramp_node.color_ramp.elements[-1].color = gradient_samples[-1]
+
+    # 添加中间控制点
+    for i in range(1, len(gradient_samples) - 1):
+        position = i / (len(gradient_samples) - 1)  # 0~1范围
+        element = toon_color_ramp_node.color_ramp.elements.new(position)
+        element.color = gradient_samples[i]
+        # 非阴影区域Alpha设为0（卡通渲染常规处理）
+        if i > len(gradient_samples) // 2:
+            element.color[3] = 0.0
+
+# ------------------------------
+# 2. 材质节点清理工具函数
+# ------------------------------
+def clear_material_nodes(material):
+    """清理材质节点树，仅保留材质输出节点"""
+    if not material.node_tree:
+        material.use_nodes = True  # 确保节点树存在
+
+    # 查找现有输出节点，若无则创建
+    output_node = next(
+        (n for n in material.node_tree.nodes if n.type == 'OUTPUT_MATERIAL'),
+        None
+    )
+    if not output_node:
+        output_node = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
+        output_node.location = (1450, 800)
+
+    # 删除所有非输出节点
+    for node in list(material.node_tree.nodes):
+        if node != output_node:
+            material.node_tree.nodes.remove(node)
+
+    return output_node
+
+# ------------------------------
+# 3. 面板类（Blender 3.6侧边栏）
+# ------------------------------
 class MMDToonTexturesToNodeEditorShaderPanel(bpy.types.Panel):
-	"""Sets up nodes in Blender node editor for rendering toon textures"""
-	bl_idname = "OBJECT_PT_mmd_toon_render_node_editor"
-	bl_label = "MMD toon textures render using node editor "
-	bl_space_type = "VIEW_3D"
-	bl_region_type = "TOOLS"
-	bl_category = "mmd_tools_helper"
+    """MMD卡通纹理节点编辑器面板"""
+    bl_idname = "OBJECT_PT_mmd_toon_render_node_editor"
+    bl_label = "MMD Toon Nodes"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"  # 侧边栏显示（按N键打开）
+    bl_category = "mmd_tools_helper"
+    bl_order = 7  # 面板显示顺序
 
-	def draw(self, context):
-		layout = self.layout
-		row = layout.row()
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="卡通渲染节点生成", icon="MATERIAL")
+        layout.operator(
+            "mmd_tools_helper.mmd_toon_render_node_editor",
+            text="创建MMD卡通节点"
+        )
 
-		row.label(text="MMD Render toon textures", icon="MATERIAL")
-		row = layout.row()
-		row.operator("mmd_tools_helper.mmd_toon_render_node_editor", text = "MMD Create Toon Material Nodes")
-		row = layout.row()
+# ------------------------------
+# 4. 节点创建核心函数
+# ------------------------------
+def create_toon_nodes(material, lamp_obj):
+    """为指定材质创建完整的MMD卡通渲染节点树"""
+    # 清理现有节点并获取输出节点
+    output_node = clear_material_nodes(material)
+    links = material.node_tree.links
 
-def toon_image_to_color_ramp(toon_texture_color_ramp, toon_image):
-	pixels_width = toon_image.size[0]
-	pixels_height = toon_image.size[1]
-	toon_image_pixels = []
-	toon_image_gradient = []
+    # ------------------------------
+    # 创建基础节点
+    # ------------------------------
+    # 主材质节点（PBR标准节点）
+    principled_bsdf = material.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+    principled_bsdf.location = (-800, 800)
+    principled_bsdf.inputs['Base Color'].default_value = (
+        material.diffuse_color[0],
+        material.diffuse_color[1],
+        material.diffuse_color[2],
+        1.0
+    )
 
-	for f in range(0, len(toon_image.pixels), 4):
-		pixel_rgba = toon_image.pixels[f:f+4]
-		toon_image_pixels.append(pixel_rgba)
+    # 灯光数据节点
+    light_data = material.node_tree.nodes.new('ShaderNodeLightData')
+    light_data.light_object = lamp_obj
+    light_data.location = (-530, -50)
 
-	for p in range(0, len(toon_image_pixels), int(len(toon_image_pixels)/32)):
-		toon_image_gradient.append(toon_image_pixels[p])
+    # 向量点积节点（计算法线与灯光夹角）
+    vector_dot = material.node_tree.nodes.new('ShaderNodeVectorMath')
+    vector_dot.operation = 'DOT_PRODUCT'
+    vector_dot.location = (-520, 470)
 
-	toon_texture_color_ramp.color_ramp.elements[0].color = toon_image_gradient[0]
-	toon_texture_color_ramp.color_ramp.elements[-1].color = toon_image_gradient[-1]
+    # 数学运算节点（调整范围）
+    math_add = material.node_tree.nodes.new('ShaderNodeMath')
+    math_add.operation = 'ADD'
+    math_add.inputs[1].default_value = 1.0
+    math_add.location = (-325, 470)
 
-	for i in range(1, len(toon_image_gradient)-2, 1):
-		toon_texture_color_ramp.color_ramp.elements.new(i/(len(toon_image_gradient)-1))
-		toon_texture_color_ramp.color_ramp.elements[i].color = toon_image_gradient[i]
-		if i > len(toon_image_gradient)/2:
-			toon_texture_color_ramp.color_ramp.elements[i].color[3] = 0.0 #alpha of non-shadow colors set to 0.0
+    math_mul1 = material.node_tree.nodes.new('ShaderNodeMath')
+    math_mul1.operation = 'MULTIPLY'
+    math_mul1.inputs[1].default_value = 0.5
+    math_mul1.location = (-90, 470)
 
-	return
+    math_mul2 = material.node_tree.nodes.new('ShaderNodeMath')
+    math_mul2.operation = 'MULTIPLY'
+    math_mul2.location = (120, 470)
 
-# def toon_image_bottom_half_to_color_ramp(toon_texture_color_ramp, toon_image):
-	# pixels_width = toon_image.size[0]
-	# pixels_height = toon_image.size[1]
-	# toon_image_pixels = []
-	# toon_image_gradient = []
+    # 卡通颜色梯度节点
+    toon_ramp = material.node_tree.nodes.new('ShaderNodeValToRGB')
+    toon_ramp.location = (340, 470)
+    toon_ramp.color_ramp.interpolation = 'CONSTANT'  # 硬边缘卡通效果
 
-	# for f in range(0, len(toon_image.pixels), 4):
-		# pixel_rgba = toon_image.pixels[f:f+4]
-		# toon_image_pixels.append(pixel_rgba)
+    # 混合节点（纹理叠加）
+    mix_toon = material.node_tree.nodes.new('ShaderNodeMixRGB')
+    mix_toon.blend_type = 'MULTIPLY'
+    mix_toon.inputs[0].default_value = 1.0
+    mix_toon.inputs['Color2'].default_value = (1.0, 1.0, 1.0, 1.0)
+    mix_toon.location = (690, 470)
+    mix_toon.label = "卡通叠加"
 
-	# for p in range(0, len(toon_image_pixels), int(len(toon_image_pixels)/32)):
-		# toon_image_gradient.append(toon_image_pixels[p])
+    mix_final = material.node_tree.nodes.new('ShaderNodeMixRGB')
+    mix_final.blend_type = 'MULTIPLY'
+    mix_final.inputs[0].default_value = 1.0
+    mix_final.location = (1000, 470)
 
-	# toon_texture_color_ramp.color_ramp.elements[0].color = toon_image_gradient[0]
-	# toon_texture_color_ramp.color_ramp.elements[-1].color = toon_image_gradient[-1]
+    mix_sphere = material.node_tree.nodes.new('ShaderNodeMixRGB')
+    mix_sphere.blend_type = 'ADD'
+    mix_sphere.inputs[0].default_value = 1.0
+    mix_sphere.location = (1240, 470)
 
-	# print('length of toon_image_gradient = ', len(toon_image_gradient))
-	# for i in range(1, int(len(toon_image_gradient)/2)-1, 1):
-		# toon_texture_color_ramp.color_ramp.elements.new((i*2/(len(toon_image_gradient)-1)))
-		# toon_texture_color_ramp.color_ramp.elements[i].color = toon_image_gradient[i]
+    # 几何节点（获取UV和法线）
+    geo_uv = material.node_tree.nodes.new('ShaderNodeGeometry')
+    geo_uv.location = (620, 250)
 
-	# return
+    geo_normal = material.node_tree.nodes.new('ShaderNodeGeometry')
+    geo_normal.location = (620, -50)
 
-def clear_material_nodes(context):
-	for m in bpy.context.active_object.data.materials:
-		if m.node_tree is not None:
-			for n in range(len(m.node_tree.nodes)-1, 1, -1):
-				m.node_tree.nodes.remove(m.node_tree.nodes[n])
+    # 纹理节点
+    tex_diffuse = material.node_tree.nodes.new('ShaderNodeTexImage')
+    tex_diffuse.location = (820, 250)
+    tex_diffuse.label = "漫反射纹理"
 
-# def create_default_material_nodes(context):
-	# bpy.context.area.type = 'NODE_EDITOR'
-	# for m in bpy.context.active_object.data.materials:
-		# if m.node_tree is not None:
-			# default_output_node = m.node_tree.nodes.new('ShaderNodeOutput')
-			# default_output_node.location = (300, 300)
-			# default_output_node.update()
-			# default_material_node = m.node_tree.nodes.new('ShaderNodeMaterial')
-			# default_material_node.location = (10, 300)
-			# default_material_node.material = m
-			# default_material_node.update()
-			# m.node_tree.interface_update(bpy.context)
-			# m.node_tree.nodes.update()
-			# m.node_tree.links.new(default_output_node.inputs['Color'], default_material_node.outputs['Color'])
-			# m.use_nodes = False
-			# m.use_nodes = True
-	# bpy.context.area.type = 'VIEW_3D'
+    tex_sphere = material.node_tree.nodes.new('ShaderNodeTexImage')
+    tex_sphere.location = (820, -50)
+    tex_sphere.label = "球面纹理"
 
+    # ------------------------------
+    # 连接节点
+    # ------------------------------
+    # 灯光与法线计算链路
+    links.new(vector_dot.inputs[0], principled_bsdf.outputs['Normal'])
+    links.new(vector_dot.inputs[1], light_data.outputs['Light Vector'])
+    links.new(math_add.inputs[0], vector_dot.outputs['Value'])
+    links.new(math_mul1.inputs[0], math_add.outputs['Value'])
+    links.new(math_mul2.inputs[0], math_mul1.outputs['Value'])
 
+    # 阴影处理链路
+    links.new(math_mul2.inputs[1], light_data.outputs['Shadow'])
 
+    # 卡通纹理链路
+    links.new(toon_ramp.inputs['Fac'], math_mul2.outputs['Value'])
+    links.new(mix_toon.inputs['Color1'], toon_ramp.outputs['Color'])
+    links.new(mix_toon.inputs['Fac'], toon_ramp.outputs['Alpha'])
+
+    # 漫反射纹理链路
+    links.new(tex_diffuse.inputs['Vector'], geo_uv.outputs['UV'])
+    links.new(mix_final.inputs['Color1'], mix_toon.outputs['Color'])
+    links.new(mix_final.inputs['Color2'], tex_diffuse.outputs['Color'])
+
+    # 球面纹理链路
+    links.new(tex_sphere.inputs['Vector'], geo_normal.outputs['Normal'])
+    links.new(mix_sphere.inputs['Color1'], mix_final.outputs['Color'])
+    links.new(mix_sphere.inputs['Color2'], tex_sphere.outputs['Color'])
+
+    # 最终输出链路
+    links.new(output_node.inputs['Surface'], mix_sphere.outputs['Color'])
+    links.new(output_node.inputs['Alpha'], principled_bsdf.outputs['Alpha'])
+
+    # ------------------------------
+    # 加载材质现有纹理（MMD标准纹理槽）
+    # ------------------------------
+    if hasattr(material, 'texture_slots'):
+        for slot_idx, slot in enumerate(material.texture_slots):
+            if not slot or not slot.texture or slot.texture.type != 'IMAGE':
+                continue
+            
+            tex_image = slot.texture.image
+            if not tex_image:
+                continue
+
+            # 槽0：漫反射纹理
+            if slot_idx == 0:
+                tex_diffuse.image = tex_image
+            # 槽1：卡通纹理
+            elif slot_idx == 1:
+                toon_image_to_color_ramp(toon_ramp, tex_image)
+            # 槽2：球面纹理
+            elif slot_idx == 2:
+                tex_sphere.image = tex_image
+                if hasattr(slot, 'blend_type'):
+                    mix_sphere.blend_type = slot.blend_type
+
+    # 处理无漫反射纹理的情况
+    if not tex_diffuse.image:
+        # 移除原连接，改用基础色
+        if mix_final.inputs['Color2'].links:
+            links.remove(mix_final.inputs['Color2'].links[0])
+        links.new(mix_final.inputs['Color2'], principled_bsdf.outputs['Base Color'])
+
+# ------------------------------
+# 5. 主执行函数
+# ------------------------------
 def main(context):
-	o = bpy.context.active_object
-	if o.type == 'MESH':
+    # 获取MMD模型的网格对象
+    mesh_objects = model.findMeshesList(context.active_object)
+    if not mesh_objects:
+        raise Exception("未找到MMD模型的网格对象，请先选择MMD模型")
 
-		if len(bpy.data.lamps) == 0:
-			bpy.data.lamps.new("Lamp", "SUN")
+    # 确保存在太阳灯（卡通渲染基础光源）
+    lamp_obj = None
+    # 查找现有太阳灯
+    for obj in context.scene.objects:
+        if obj.type == 'LIGHT' and obj.data.type == 'SUN':
+            lamp_obj = obj
+            break
+    # 若无则创建
+    if not lamp_obj:
+        light_data = bpy.data.lights.new("MMD_Toon_Light", 'SUN')
+        lamp_obj = bpy.data.objects.new("MMD_Toon_Light", light_data)
+        context.scene.collection.objects.link(lamp_obj)
+        lamp_obj.rotation_euler = (1.106, 0, 0.785)  # 优化角度
 
-		for object in bpy.context.scene.objects:
-			if object.data == bpy.data.lamps[0]:
-				LAMP = object
+    # 为每个网格的每个材质创建节点
+    for mesh in mesh_objects:
+        if mesh.type != 'MESH':
+            continue
+        context.view_layer.objects.active = mesh
+        
+        for material in mesh.data.materials:
+            create_toon_nodes(material, lamp_obj)
 
-		if o.data.materials is not None:
-			for m in o.data.materials:
-				m.use_nodes = True
-				# m.node_tree.nodes.new('OUTPUT')
-				# m.node_tree.nodes.new('MATERIAL')
-				output_node = m.node_tree.nodes[0]
-				output_node.location = (1450, 800)
-				material_node = m.node_tree.nodes[1]
-				material_node.material = m
-				material_node.location = (-800, 800)
-
-				lamp_node = m.node_tree.nodes.new('ShaderNodeLampData')
-				lamp_node.lamp_object = LAMP
-				lamp_node.location = (-530, -50)
-
-				rgb_to_bw = m.node_tree.nodes.new('ShaderNodeRGBToBW')
-				rgb_to_bw.location = (-90, -50) #(120, 470) (-530, -50)
-
-				vector_math_node = m.node_tree.nodes.new('ShaderNodeVectorMath')
-				vector_math_node.operation = 'DOT_PRODUCT'
-				vector_math_node.location = (-520, 470)
-
-				math_node_1 = m.node_tree.nodes.new('ShaderNodeMath')
-				math_node_1.operation = 'ADD'
-				math_node_1.inputs[1].default_value = 1.0
-				math_node_1.location = (-325, 470)
-
-				math_node_2 = m.node_tree.nodes.new('ShaderNodeMath')
-				math_node_2.operation = 'MULTIPLY'
-				math_node_2.inputs[1].default_value = 0.5 #1.0
-				# math_node_2.use_clamp = True
-				math_node_2.location = (-90, 470)
-
-				math_node_3 = m.node_tree.nodes.new('ShaderNodeMath')
-				math_node_3.operation = 'MULTIPLY'
-				math_node_3.location = (120, 470)
-
-				toon_texture_color_ramp = m.node_tree.nodes.new('ShaderNodeValToRGB')
-				toon_texture_color_ramp.location = (340, 470)
-
-				mix_rgb_node_ramp_overlay = m.node_tree.nodes.new('ShaderNodeMixRGB')
-				mix_rgb_node_ramp_overlay.blend_type = 'MULTIPLY' #was 'OVERLAY'
-				mix_rgb_node_ramp_overlay.inputs[0].default_value = 1.0
-				mix_rgb_node_ramp_overlay.inputs['Color2'].default_value = (1.0, 1.0, 1.0, 1.0)
-				mix_rgb_node_ramp_overlay.location = (690, 470)
-				mix_rgb_node_ramp_overlay.label = "toon_modifier"
-
-				mix_rgb_node = m.node_tree.nodes.new('ShaderNodeMixRGB')
-				mix_rgb_node.blend_type = 'MULTIPLY'
-				mix_rgb_node.inputs[0].default_value = 1.0
-				# mix_rgb_node.use_clamp = True
-				mix_rgb_node.location = (1000, 470)
-				mix_rgb_node.inputs['Color2'].default_value = (m.diffuse_color[0], m.diffuse_color[1], m.diffuse_color[2], 1.0)
-
-				mix_rgb_node_add_sphere = m.node_tree.nodes.new('ShaderNodeMixRGB')
-				mix_rgb_node_add_sphere.blend_type = 'ADD'
-				mix_rgb_node_add_sphere.inputs[0].default_value = 1.0
-				mix_rgb_node_add_sphere.location = (1240, 470)
-
-				diffuse_texture_geomety_uv_node = m.node_tree.nodes.new('ShaderNodeGeometry')
-				diffuse_texture_geomety_uv_node.location = (620, 250)
-
-				diffuse_texture_node = m.node_tree.nodes.new('ShaderNodeTexture')
-				diffuse_texture_node.location = (820, 250)
-
-				sphere_texture_geometry_normal_node = m.node_tree.nodes.new('ShaderNodeGeometry')
-				sphere_texture_geometry_normal_node.location = (620, -50)
-
-				sphere_texture_node = m.node_tree.nodes.new('ShaderNodeTexture')
-				sphere_texture_node.location = (820, -50)
-
-
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(output_node.inputs['Alpha'], material_node.outputs['Alpha'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(vector_math_node.inputs[0], material_node.outputs['Normal']) #vector_math_node.inputs['Vector']
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(vector_math_node.inputs[1], lamp_node.outputs['Light Vector']) #vector_math_node.inputs['Vector']
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(rgb_to_bw.inputs['Color'], lamp_node.outputs['Shadow']) #math_node_3.inputs['Value']
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(math_node_3.inputs[1], rgb_to_bw.outputs['Val'])
-
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(math_node_1.inputs[0], vector_math_node.outputs['Value']) #math_node_1.inputs['Value']
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(math_node_2.inputs['Value'], math_node_1.outputs['Value'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(math_node_3.inputs[0], math_node_2.outputs['Value']) #math_node_3.inputs['Value']
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(toon_texture_color_ramp.inputs['Fac'], math_node_3.outputs['Value'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node_ramp_overlay.inputs['Color1'], toon_texture_color_ramp.outputs['Color'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node_ramp_overlay.inputs['Fac'], toon_texture_color_ramp.outputs['Alpha'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node.inputs['Color1'], mix_rgb_node_ramp_overlay.outputs['Color'])
-
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node_add_sphere.inputs['Color1'], mix_rgb_node.outputs['Color'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(output_node.inputs['Color'], mix_rgb_node_add_sphere.outputs['Color'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(diffuse_texture_node.inputs['Vector'], diffuse_texture_geomety_uv_node.outputs['UV'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node.inputs['Color2'], diffuse_texture_node.outputs['Color'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(sphere_texture_node.inputs['Vector'], sphere_texture_geometry_normal_node.outputs['Normal'])
-				print(len(m.node_tree.links))
-				m.node_tree.links.new(mix_rgb_node_add_sphere.inputs['Color2'],sphere_texture_node.outputs['Color'])
-
-
-
-
-
-				if m.texture_slots is not None:
-					for t in range(len(m.texture_slots)):
-						if m.texture_slots[t] is not None:
-							texture_name = m.texture_slots[t].texture.name
-							if t == 0:
-								diffuse_texture_node.texture = bpy.data.textures[texture_name]
-								diffuse_exists = True
-								# bpy.data.textures[texture_name]["mmd_texture_type"] = "DIFFUSE"
-							if t == 1:
-								if m.texture_slots[t].texture.type == 'IMAGE':
-									if m.texture_slots[t].texture.image is not None:
-										#toon_image_bottom_half_to_color_ramp(toon_texture_color_ramp, m.texture_slots[t].texture.image)
-										toon_image_to_color_ramp(toon_texture_color_ramp, m.texture_slots[t].texture.image)
-									# bpy.data.textures[texture_name]["mmd_texture_type"] = "TOON"
-									# bpy.context.active_object.data.materials[0].texture_slots[1].texture.image.name
-							if t == 2:
-								mix_rgb_node_add_sphere.blend_type = m.texture_slots[t].blend_type
-								sphere_texture_node.texture = bpy.data.textures[texture_name]
-								sphere_exists = True
-								# bpy.data.textures[texture_name]["mmd_texture_type"] = "SPHERE"
-
-				if diffuse_texture_node.texture == None:
-					# m.node_tree.links.new(mix_rgb_node.inputs['Color2'], material_node.outputs['Color'])
-					# m.use_shadeless = True
-					m.node_tree.links.remove(mix_rgb_node.inputs['Color2'].links[0])
-					print("This mesh object has no diffuse texture.")
-
-
-
-
+# ------------------------------
+# 6. 操作符类
+# ------------------------------
 class MMDToonTexturesToNodeEditorShader(bpy.types.Operator):
-	"""Sets up nodes in Blender node editor for rendering toon textures"""
-	bl_idname = "mmd_tools_helper.mmd_toon_render_node_editor"
-	bl_label = "MMD toon textures render using node editor "
+    """创建MMD卡通渲染节点树"""
+    bl_idname = "mmd_tools_helper.mmd_toon_render_node_editor"
+    bl_label = "创建MMD卡通节点"
+    bl_options = {'REGISTER', 'UNDO'}  # 支持撤销
+    bl_description = "为MMD模型生成卡通渲染节点树"
 
+    @classmethod
+    def poll(cls, context):
+        """仅当选中有效对象时启用按钮"""
+        return context.active_object is not None
 
-	# @classmethod
-	# def poll(cls, context):
-		# return context.active_object is not None
+    def execute(self, context):
+        try:
+            main(context)
+            self.report({'INFO'}, "卡通节点创建成功！")
+            return {'FINISHED'}
+        except Warning as w:
+            self.report({'WARNING'}, str(w))
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
 
-	def execute(self, context):
-
-		mesh_objects_list = model.find_MMD_MeshesList(bpy.context.active_object)
-		assert(mesh_objects_list is not None), "The active object is not an MMD model."
-		for o in mesh_objects_list:
-			bpy.context.scene.objects.active = o
-			clear_material_nodes(context)
-			# create_default_material_nodes(context)
-			main(context)
-		return {'FINISHED'}
-
-
+# ------------------------------
+# 7. 注册/注销
+# ------------------------------
 def register():
-	bpy.utils.register_class(MMDToonTexturesToNodeEditorShader)
-	bpy.utils.register_class(MMDToonTexturesToNodeEditorShaderPanel)
-
+    bpy.utils.register_class(MMDToonTexturesToNodeEditorShaderPanel)
+    bpy.utils.register_class(MMDToonTexturesToNodeEditorShader)
 
 def unregister():
-	bpy.utils.unregister_class(MMDToonTexturesToNodeEditorShader)
-	bpy.utils.unregister_class(MMDToonTexturesToNodeEditorShaderPanel)
-
+    bpy.utils.unregister_class(MMDToonTexturesToNodeEditorShaderPanel)
+    bpy.utils.unregister_class(MMDToonTexturesToNodeEditorShader)
 
 if __name__ == "__main__":
-	register()
-
-
+    register()

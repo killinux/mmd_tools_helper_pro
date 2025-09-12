@@ -1,77 +1,54 @@
 bl_info = {
-	"name": "MMD tools helper",
-	"author": "Hogarth-MMD",
-	"version": (1, 0),
-    "blender": (2, 80, 0),
-	#"location": "View3D > Tool Shelf > MMD Tools Helper",
-	"location": "View3D > Sidebar > mmdtools",
-	"description": "various mmd_tools helper scripts",
-	"warning": "",
-	"wiki_url": "",
-	"category": "Object",
-	}
+    "name": "MMD tools helper",
+    "author": "Hogarth-MMD",
+    "version": (2, 4),
+    "blender": (3, 6, 0),  # 更新为Blender 3.6版本
+    "location": "View3D > Sidebar > MMD Tools Helper",  # 位置更新为侧边栏
+    "description": "various mmd_tools helper scripts",
+    "warning": "",
+    "wiki_url": "",
+    "category": "Object",
+}
 
 import bpy
-from bpy.types import Panel
-print("init--->>>>")
+import importlib  # 替换imp模块为importlib
+
 class MMDToolsHelperPanel(bpy.types.Panel):
-	"""Creates the MMD Tools Helper Panel in a VIEW_3D TOOLS tab"""
-	bl_label = "MMD Tools Helper"
-	bl_idname = "OBJECT_PT_mmd_tools_helper"
-	bl_space_type = "VIEW_3D"
-	#bl_region_type = "TOOLS"
-	#modify by hao
-	#bl_region_type = "UI"
-	#bl_category = "mmd_tools_helper"
-	bl_region_type = 'UI'  # 高版本侧边栏类型
-	bl_category = 'mmd_tools_helper'
+    """Creates the MMD Tools Helper Panel in VIEW_3D UI tab"""
+    bl_label = "MMD Tools Helper"
+    bl_idname = "OBJECT_PT_mmd_tools_helper"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"  # Blender 2.8+使用UI替代TOOLS
+    bl_category = "MMD Tools Helper"  # 侧边栏中的标签名称
+
+    def draw(self, context):
+        print("init--draw")
+        layout = self.layout
+        row = layout.row()
+        # 可以在这里添加面板默认内容
 
 
-	def draw(self, context):
-		print("Hello World mmdtools-->")
-		layout = self.layout
-		layout.label(text="Hello mmdtools !")
-		row = layout.row()
-		layout.label(text="hehe")
+# 导入子模块
+from . import (
+    model,
+    mmd_view,
+    mmd_lamp_setup,
+    convert_to_blender_camera,
+    background_color_picker,
+    boneMaps_renamer,
+    replace_bones_renaming,
+    armature_diagnostic,
+    add_foot_leg_ik,
+    add_hand_arm_ik,
+    display_panel_groups,
+    toon_textures_to_node_editor_shader,
+    toon_modifier,
+    reverse_japanese_english,
+    miscellaneous_tools,
+    blender_bone_names_to_japanese_bone_names
+)
 
-from . import model
-from . import mmd_view
-from . import mmd_lamp_setup
-from . import convert_to_blender_camera
-from . import background_color_picker
-from . import boneMaps_renamer
-from . import replace_bones_renaming
-from . import armature_diagnostic
-from . import add_foot_leg_ik
-from . import add_hand_arm_ik
-from . import display_panel_groups
-from . import toon_textures_to_node_editor_shader
-from . import toon_modifier
-from . import reverse_japanese_english
-from . import miscellaneous_tools
-from . import blender_bone_names_to_japanese_bone_names
-
-
-#import imp
-
-#imp.reload(model)
-#imp.reload(mmd_view)
-#imp.reload(mmd_lamp_setup)
-#imp.reload(convert_to_blender_camera)
-#imp.reload(background_color_picker)
-#imp.reload(boneMaps_renamer)
-#imp.reload(replace_bones_renaming)
-#imp.reload(armature_diagnostic)
-#imp.reload(add_foot_leg_ik)
-#imp.reload(add_hand_arm_ik)
-#imp.reload(display_panel_groups)
-#imp.reload(toon_textures_to_node_editor_shader)
-#imp.reload(toon_modifier)
-#imp.reload(reverse_japanese_english)
-#imp.reload(miscellaneous_tools)
-#imp.reload(blender_bone_names_to_japanese_bone_names)
-
-import importlib
+# 使用importlib.reload替代imp.reload
 importlib.reload(model)
 importlib.reload(mmd_view)
 importlib.reload(mmd_lamp_setup)
@@ -89,24 +66,48 @@ importlib.reload(reverse_japanese_english)
 importlib.reload(miscellaneous_tools)
 importlib.reload(blender_bone_names_to_japanese_bone_names)
 
-classes = [
-    MMDToolsHelperPanel,
-    #MMDView,
-    #MMDViewPanel
-
-]
 
 def register():
-	#bpy.utils.register_module(__name__)
-	for cls in classes:
-		bpy.utils.register_class(cls)
+    bpy.utils.register_class(MMDToolsHelperPanel)
+    # 确保子模块中的类也被注册
+    #model.register()
+    mmd_view.register()
+    mmd_lamp_setup.register()
+    convert_to_blender_camera.register()
+    background_color_picker.register()
+    boneMaps_renamer.register()
+    replace_bones_renaming.register()
+    armature_diagnostic.register()
+    add_foot_leg_ik.register()
+    add_hand_arm_ik.register()
+    display_panel_groups.register()
+    toon_textures_to_node_editor_shader.register()
+    toon_modifier.register()
+    reverse_japanese_english.register()
+    miscellaneous_tools.register()
+    blender_bone_names_to_japanese_bone_names.register()
 
 
 def unregister():
-	#bpy.utils.unregister_module(__name__)
-	for cls in classes:
-		bpy.utils.unregister_class(cls)
+    bpy.utils.unregister_class(MMDToolsHelperPanel)
+    # 确保子模块中的类也被注销
+    #model.unregister()
+    mmd_view.unregister()
+    mmd_lamp_setup.unregister()
+    convert_to_blender_camera.unregister()
+    background_color_picker.unregister()
+    boneMaps_renamer.unregister()
+    replace_bones_renaming.unregister()
+    armature_diagnostic.unregister()
+    add_foot_leg_ik.unregister()
+    add_hand_arm_ik.unregister()
+    display_panel_groups.unregister()
+    toon_textures_to_node_editor_shader.unregister()
+    toon_modifier.unregister()
+    reverse_japanese_english.unregister()
+    miscellaneous_tools.unregister()
+    blender_bone_names_to_japanese_bone_names.unregister()
 
 
 if __name__ == "__main__":
-	register()
+    register()

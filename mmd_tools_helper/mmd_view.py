@@ -96,4 +96,4 @@ def unregister():
 if __name__ == "__main__":
     print("mmd_view.py---main--?????")
     register()
-register()
+#register()
