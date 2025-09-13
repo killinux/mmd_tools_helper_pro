@@ -1,291 +1,232 @@
-bl_info = {
-    "name": "MMD Armature Diagnostic",
-    "author": "Original Author (Adapted for Blender 3.6)",
-    "version": (1, 0, 1),
-    "blender": (3, 6, 0),  # 明确适配 Blender 3.6
-    "location": "View3D > Sidebar > mmd_tools_helper",
-    "description": "Diagnoses MMD armatures: checks missing bones and lists all bones",
-    "warning": "Requires 'import_csv.py' and 'model.py' (from mmd_tools_helper)",
-    "category": "MMD Tools",
-    "support": "COMMUNITY"
-}
-
 import bpy
-
-# --------------------------
-# 依赖模块容错导入（Blender 3.6 适配）
-# --------------------------
-try:
-    from . import import_csv
-    from . import model
-    DEPENDENCIES_LOADED = True
-    print("✅ Armature Diagnostic: Dependencies (import_csv.py/model.py) loaded")
-except ImportError as e:
-    DEPENDENCIES_LOADED = False
-    MISSING_MODULE = str(e).split("'")[1] if "'" in str(e) else "Unknown"
-    print(f"❌ Armature Diagnostic: Missing module - {MISSING_MODULE}.py")
-    print("⚠️  Solution: Place 'import_csv.py' and 'model.py' in the same folder as this script")
+from . import import_csv  # 需确保同目录下有 import_csv.py 模块
+from . import model       # 需确保同目录下有 model.py 模块（含 findArmature 函数）
 
 
-# --------------------------
-# UI 面板（3.6 布局优化）
-# --------------------------
+# ------------------------------
+# 1. 面板类（适配 Blender 2.8+ UI 结构）
+# ------------------------------
 class ArmatureDiagnosticPanel(bpy.types.Panel):
-    """骨架诊断面板：检查缺失骨骼并打印骨骼列表"""
-    bl_label = "MMD Armature Diagnostic"
-    bl_idname = "OBJECT_PT_armature_diagnostic"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"  # 3.6 侧边栏标准区域（替代旧版 TOOLS）
-    bl_category = "mmd_tools_helper"  # 侧边栏标签页（与其他 MMD 工具统一）
-    bl_order = 12  # 排序：在 MMD 工具面板后显示
-    bl_options = {'DEFAULT_CLOSED'}  # 默认折叠，减少 UI 占用
-
-    def draw_header(self, context):
-        """面板头部：显示图标"""
-        self.layout.label(text="", icon="DIAGNOSTIC")
+    """骨架诊断面板（显示在 3D 视图侧边栏）"""
+    bl_label = "Armature Diagnostic Panel"  # 面板显示名称
+    bl_idname = "OBJECT_PT_armature_diagnostic"  # 唯一ID（不可重复）
+    bl_space_type = "VIEW_3D"  # 所在空间：3D 视图
+    bl_region_type = "UI"      # 所在区域：侧边栏（Blender 2.8+ 废弃 TOOLS 区域）
+    bl_category = "mmd_tools_helper"  # 侧边栏标签（无则手动在 Blender 中创建）
+    bl_context = "objectmode"  # 仅在物体模式下显示（避免编辑模式报错）
 
     def draw(self, context):
         layout = self.layout
-        col = layout.column(align=True)
+        scene = context.scene
+        view_layer = scene.view_layers[0]  # 从视图层获取活跃对象（关键修复）
 
-        # 1. 依赖缺失提示（优先显示）
-        if not DEPENDENCIES_LOADED:
-            col.label(text="❌ Missing Dependencies!", icon='ERROR')
-            col.label(text=f"Required: {MISSING_MODULE}.py")
-            col.label(text="Place in same folder as main script")
-            return
+        # 1. 选择要诊断的骨架类型（枚举属性）
+        layout.prop(scene, "selected_armature_to_diagnose", text="Armature Type")
+        
+        # 2. 标题与分隔符（优化布局美观度）
+        layout.separator()
+        row = layout.row()
+        row.label(text="Armature Diagnostic", icon="ARMATURE_DATA")  # 带骨架图标
 
-        # 2. 骨架类型选择（下拉菜单）
-        col.label(text="Target Bone Type:", icon='ARMATURE_DATA')
-        col.prop(context.scene, "selected_armature_to_diagnose", text="")
-        col.separator()
-
-        # 3. 诊断按钮（仅选中对象时可用）
-        row = col.row()
-        row.enabled = (context.active_object is not None)  # 按钮可用性控制
-        row.operator(
-            "mmd_tools_helper.armature_diagnostic",
-            text="Run Armature Diagnostic",
-            icon='PLAY'
-        )
-
-        # 4. 操作提示
-        col.label(text="ℹ️  Check Console for Results", icon='INFO')
+        # 3. 诊断按钮（仅当选中有效对象时可点击）
+        layout.separator()
+        row = layout.row()
+        row.operator("mmd_tools_helper.armature_diagnostic", text="Diagnose Armature")
+        # 按钮可用性控制：仅选中对象时启用（避免空对象报错）
+        row.enabled = bool(view_layer.objects.active)
 
 
-# --------------------------
-# 核心诊断逻辑（3.6 容错增强）
-# --------------------------
-def diagnose_missing_bones(context, armature, target_bone_type):
-    """
-    检测骨架中缺失的骨骼
-    :param context: Blender 上下文
-    :param armature: 目标骨架对象
-    :param target_bone_type: 待诊断的骨骼类型（如 mmd_english）
-    :return: 缺失的骨骼列表
-    """
-    missing_bones = []
+# ------------------------------
+# 2. 核心诊断逻辑（修复活跃对象获取路径）
+# ------------------------------
+def main(context):
+    missing_bone_names = []
+    scene = context.scene
+    view_layer = scene.view_layers[0]  # 关键：从视图层获取活跃对象（Blender 2.8+ 必需）
 
-    # 1. 加载骨骼字典（容错处理）
+    # 1. 读取 CSV 骨骼字典（容错处理：避免模块缺失或读取失败导致崩溃）
     try:
-        main_bone_dict = import_csv.use_csv_bones_dictionary()  # 主体骨骼字典
-        finger_bone_dict = import_csv.use_csv_bones_fingers_dictionary()  # 手指骨骼字典
+        BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_dictionary()
+        FINGER_BONE_NAMES_DICTIONARY = import_csv.use_csv_bones_fingers_dictionary()
     except Exception as e:
-        raise RuntimeError(f"Failed to load bone dictionaries: {str(e)}")
+        print(f"【错误】读取骨骼字典失败：{str(e)}")
+        return
 
-    # 2. 检查字典有效性
-    if not (main_bone_dict and finger_bone_dict and len(main_bone_dict) > 0 and len(finger_bone_dict) > 0):
-        raise ValueError("Bone dictionaries are empty or invalid (check CSV files)")
+    # 2. 验证字典格式（首行需为骨骼类型列表）
+    if not (isinstance(BONE_NAMES_DICTIONARY, list) and len(BONE_NAMES_DICTIONARY) > 0):
+        print("【错误】普通骨骼字典格式无效（需为非空列表）")
+        return
+    if not (isinstance(FINGER_BONE_NAMES_DICTIONARY, list) and len(FINGER_BONE_NAMES_DICTIONARY) > 0):
+        print("【错误】手指骨骼字典格式无效（需为非空列表）")
+        return
 
-    # 3. 确认目标骨骼类型在字典中
-    if target_bone_type not in main_bone_dict[0] or target_bone_type not in finger_bone_dict[0]:
-        raise ValueError(f"Target bone type '{target_bone_type}' not found in dictionaries")
+    # 3. 获取选中的骨骼类型及索引（容错：避免类型不存在导致崩溃）
+    SelectedBoneMap = scene.selected_armature_to_diagnose
+    try:
+        BoneMapIndex = BONE_NAMES_DICTIONARY[0].index(SelectedBoneMap)
+        FingerBoneMapIndex = FINGER_BONE_NAMES_DICTIONARY[0].index(SelectedBoneMap)
+    except ValueError:
+        print(f"【错误】选中的骨骼类型「{SelectedBoneMap}」不在字典中")
+        return
 
-    # 4. 获取目标骨骼类型的索引
-    main_idx = main_bone_dict[0].index(target_bone_type)
-    finger_idx = finger_bone_dict[0].index(target_bone_type)
+    # 4. 找到并激活骨架对象（依赖 model.findArmature 函数）
+    active_obj = view_layer.objects.active  # 从视图层拿活跃对象（而非 scene）
+    armature_obj = model.findArmature(active_obj)
+    if not (armature_obj and armature_obj.type == "ARMATURE"):
+        print("【错误】未找到有效骨架对象（选中对象或其关联对象需为骨架）")
+        return
+    view_layer.objects.active = armature_obj  # 在视图层中激活骨架（关键修复）
 
-    # 5. 获取骨架中已存在的骨骼
-    existing_bones = set(armature.data.bones.keys())  # 用集合提升查询效率
+    # 5. 检测普通骨骼是否缺失
+    for bone_entry in BONE_NAMES_DICTIONARY[1:]:  # 跳过首行（骨骼类型列表）
+        # 避免索引越界（容错：处理字典行长度不一致的情况）
+        if len(bone_entry) <= BoneMapIndex:
+            continue
+        target_bone = bone_entry[BoneMapIndex]
+        # 跳过空名称和排除列表（原逻辑保留）
+        if (target_bone != "" 
+            and target_bone not in ["upper body 2", "上半身2"]
+            and target_bone not in armature_obj.data.bones):
+            missing_bone_names.append(target_bone)
 
-    # 6. 检查主体骨骼缺失
-    for bone_entry in main_bone_dict[1:]:  # 跳过表头行
-        bone_name = bone_entry[main_idx]
-        # 过滤无效骨骼名称（空值、特殊非必需骨骼）
-        if (bone_name 
-            and bone_name.strip() 
-            and bone_name not in ["upper body 2", "上半身2"]):
-            if bone_name not in existing_bones:
-                missing_bones.append(bone_name)
+    # 6. 检测手指骨骼是否缺失
+    for finger_entry in FINGER_BONE_NAMES_DICTIONARY[1:]:  # 跳过首行
+        if len(finger_entry) <= FingerBoneMapIndex:
+            continue
+        target_finger_bone = finger_entry[FingerBoneMapIndex]
+        if (target_finger_bone != ""
+            and target_finger_bone not in ["thumb0_L", "thumb0_R", "左親指0", "親指0.L", "右親指0", "親指0.R"]
+            and target_finger_bone not in armature_obj.data.bones):
+            missing_bone_names.append(target_finger_bone)
 
-    # 7. 检查手指骨骼缺失
-    for bone_entry in finger_bone_dict[1:]:  # 跳过表头行
-        bone_name = bone_entry[finger_idx]
-        # 过滤无效骨骼名称
-        if (bone_name 
-            and bone_name.strip() 
-            and bone_name not in ["thumb0_L", "thumb0_R", "左親指0", "親指0.L", "右親指0", "親指0.R"]):
-            if bone_name not in existing_bones:
-                missing_bones.append(bone_name)
-
-    return sorted(missing_bones)  # 排序后返回，便于阅读
-
-
-def print_all_bones(armature):
-    """打印骨架中所有非辅助骨骼（排除 dummy/shadow 等）"""
-    # 过滤规则：排除名称含 "dummy" 或 "shadow" 的骨骼（不区分大小写）
-    valid_bones = [
-        bone.name for bone in armature.data.bones 
-        if not ("dummy" in bone.name.lower() or "shadow" in bone.name.lower())
-    ]
-
-    # 控制台打印格式化结果
-    print("\n" + "="*60)
-    print(f"📊 All Valid Bones in Armature: {armature.name}")
-    print(f"Total Bones: {len(valid_bones)}")
-    print("-"*60)
-    for i, bone in enumerate(valid_bones, 1):
-        print(f"{i:3d}. {bone}")  # 带序号，便于计数
-    print("="*60 + "\n")
+    # 7. 打印诊断结果（优化格式，便于阅读）
+    print("\n" + "="*50)
+    print(f"【骨架诊断结果】选中的骨骼类型：{SelectedBoneMap}")
+    print(f"【缺失骨骼列表】共 {len(missing_bone_names)} 个缺失骨骼：")
+    if missing_bone_names:
+        for idx, bone in enumerate(missing_bone_names, 1):
+            print(f"  {idx}. {bone}")
+    else:
+        print("  无缺失骨骼（骨架完整性良好）")
+    
+    # 8. MMD 英文骨骼特殊提示（原逻辑保留）
+    if SelectedBoneMap == "mmd_english":
+        print("\n【提示】以下 3 个骨骼为 MMD 半标准骨骼，非必需：")
+        print("  - upper body 2（上半身2）")
+        print("  - thumb0_L（左手拇指0）")
+        print("  - thumb0_R（右手拇指0）")
+    print("="*50 + "\n")
 
 
-# --------------------------
-# 诊断操作器（支持 Blender 3.6 撤销）
-# --------------------------
+# ------------------------------
+# 3. 操作器类（诊断按钮逻辑）
+# ------------------------------
 class ArmatureDiagnostic(bpy.types.Operator):
-    """执行骨架诊断：打印骨骼列表 + 检测缺失骨骼"""
-    bl_idname = "mmd_tools_helper.armature_diagnostic"
-    bl_label = "Run Armature Diagnostic"
-    bl_description = "Lists all bones and checks missing bones for selected type"
-    bl_options = {'REGISTER', 'UNDO'}  # 3.6 必需显式声明 UNDO 支持
+    """骨架诊断操作器（点击按钮时执行）"""
+    bl_idname = "mmd_tools_helper.armature_diagnostic"  # 操作器唯一ID（与面板按钮关联）
+    bl_label = "Armature Diagnostic"                    # 操作器显示名称
+    bl_options = {"REGISTER", "UNDO"}                   # 启用注册和撤销功能（提升用户体验）
 
+    # 控制操作器可用性：仅当选中对象时可点击（避免空对象报错）
     @classmethod
     def poll(cls, context):
-        """操作器可用条件：依赖加载完成 + 有选中对象"""
-        return DEPENDENCIES_LOADED and context.active_object is not None
+        view_layer = context.scene.view_layers[0]
+        return bool(view_layer.objects.active)  # 仅选中对象时启用按钮
 
     def execute(self, context):
-        try:
-            # 1. 找到目标骨架（支持选中网格/骨架对象）
-            armature = model.findArmature(context.active_object)
-            if not armature or armature.type != 'ARMATURE':
-                self.report({'ERROR'}, "No valid armature found for selected object")
-                return {'CANCELLED'}
+        scene = context.scene
+        view_layer = scene.view_layers[0]
 
-            # 2. 打印所有骨骼列表
-            print_all_bones(armature)
+        # 1. 找到并激活骨架对象
+        active_obj = view_layer.objects.active
+        armature_obj = model.findArmature(active_obj)
+        if not (armature_obj and armature_obj.type == "ARMATURE"):
+            self.report({"ERROR"}, "未找到有效骨架对象！")  # 在 Blender 信息栏提示错误
+            return {"CANCELLED"}  # 终止操作
 
-            # 3. 获取用户选择的诊断骨骼类型
-            target_bone_type = context.scene.selected_armature_to_diagnose
+        # 2. 打印当前骨架的所有骨骼名称（排除含 "dummy" 和 "shadow" 的骨骼）
+        valid_bones = [
+            b.name for b in armature_obj.data.bones 
+            if "dummy" not in b.name.lower() and "shadow" not in b.name.lower()
+        ]
+        print("\n" + "="*50)
+        print(f"【当前骨架信息】名称：{armature_obj.name}")
+        print(f"【有效骨骼列表】共 {len(valid_bones)} 个骨骼：")
+        for idx, bone in enumerate(sorted(valid_bones), 1):  # 排序后打印，便于查找
+            print(f"  {idx}. {bone}")
+        print("="*50 + "\n")
 
-            # 4. 检测缺失骨骼
-            missing_bones = diagnose_missing_bones(context, armature, target_bone_type)
+        # 3. 执行核心诊断逻辑
+        main(context)
 
-            # 5. 打印缺失骨骼报告
-            print("\n" + "="*60)
-            print(f"🔍 Missing Bones Report (Target Type: {target_bone_type})")
-            print(f"Armature: {armature.name}")
-            print(f"Missing Bones Count: {len(missing_bones)}")
-            print("-"*60)
-            if missing_bones:
-                for i, bone in enumerate(missing_bones, 1):
-                    print(f"{i:3d}. {bone}")
-                # MMD 英文骨骼特殊提示
-                if target_bone_type == 'mmd_english':
-                    print("\n⚠️ Note: 'upper body 2', 'thumb0_L', 'thumb0_R' are non-essential MMD bones")
-            else:
-                print("✅ No missing bones! All required bones exist.")
-            print("="*60 + "\n")
-
-            # 6. 状态栏反馈成功信息
-            self.report({'INFO'}, f"Diagnostic done! Check console (Missing: {len(missing_bones)})")
-            return {'FINISHED'}
-
-        except Exception as e:
-            # 错误捕获与反馈
-            error_msg = str(e)[:100]  # 截取前100字符，避免状态栏显示过长
-            self.report({'ERROR'}, f"Diagnostic failed: {error_msg}")
-            print(f"❌ Diagnostic Error: {str(e)}")
-            return {'CANCELLED'}
+        # 4. 在 Blender 信息栏显示成功提示
+        self.report({"INFO"}, "骨架诊断完成！详见系统控制台输出")
+        return {"FINISHED"}  # 标记操作成功
 
 
-# --------------------------
-# 场景属性注册（3.6 规范）
-# --------------------------
+# ------------------------------
+# 4. 注册场景属性（骨骼类型枚举）
+# ------------------------------
 def register_scene_properties():
-    """注册骨骼类型选择枚举属性（移至 register 内，避免全局污染）"""
+    """注册场景级枚举属性（供面板选择骨骼类型）"""
+    # 骨骼类型选项列表（优化原代码拼写错误：MikuMikuDamce → MikuMikuDance）
     bone_type_items = [
-        ('mmd_english', 'MMD English', 'MMD 英文骨骼（Hips/Spine）'),
-        ('mmd_japanese', 'MMD Japanese', 'MMD 日文骨骼（骨盤/背骨）'),
-        ('mmd_japaneseLR', 'MMD Japanese (.L.R)', 'MMD 日文骨骼（带 .L/.R 后缀）'),
-        ('xna_lara', 'XNALara', 'XNALara 骨骼命名'),
-        ('daz_poser', 'DAZ/Poser', 'DAZ/Poser/Second Life 骨骼'),
-        ('blender_rigify', 'Blender Rigify', 'Blender Rigify 预绑定骨骼'),
-        ('sims_2', 'Sims 2', '模拟人生 2 骨骼'),
-        ('motion_builder', 'Motion Builder', 'Motion Builder 骨骼'),
-        ('3ds_max', '3ds Max', '3ds Max 标准骨骼'),
-        ('bepu', 'Bepu IK', 'Bepu 全身 IK 骨骼'),
-        ('project_mirai', 'Project Mirai', '初音未来：未来计划 骨骼'),
-        ('manuel_bastioni_lab', 'Manuel Bastioni', 'Manuel Bastioni Lab 骨骼'),
-        ('makehuman_mhx', 'MakeHuman MHX', 'MakeHuman MHX 导出骨骼'),
-        ('sims_3', 'Sims 3', '模拟人生 3 骨骼'),
-        ('doa5lr', 'DOA5LR', '死或生 5 骨骼'),
-        ('Bip_001', 'Bip001', '标准 Bip001 骨骼（UE/Unity）'),
-        ('biped_3ds_max', '3DS Max Biped', '3ds Max Biped 骨骼'),
-        ('biped_sfm', 'SFM Biped', 'Source Film Maker Biped 骨骼'),
-        ('valvebiped', 'ValveBiped', 'Valve 骨骼（TF2/CS:GO）'),
-        ('iClone7', 'iClone7', 'iClone7 角色骨骼')
+        ('mmd_english', 'MMD English', 'MikuMikuDance English bone names'),
+        ('mmd_japanese', 'MMD Japanese', 'MikuMikuDance Japanese bone names'),
+        ('mmd_japaneseLR', 'MMD Japanese (.L.R)', 'MikuMikuDance Japanese bones with .L.R suffixes'),
+        ('xna_lara', 'XNALara', 'XNALara bone names'),
+        ('daz_poser', 'DAZ/Poser', 'DAZ/Poser bone names'),
+        ('blender_rigify', 'Blender Rigify', 'Blender Rigify bone names (pre-rig)'),
+        ('sims_2', 'Sims 2', 'Sims 2 bone names'),
+        ('motion_builder', 'Motion Builder', 'Motion Builder bone names'),
+        ('3ds_max', '3ds Max', '3ds Max bone names'),
+        ('bepu', 'Bepu Full-Body IK', 'Bepu full body IK bone names'),
+        ('project_mirai', 'Project Mirai', 'Project Mirai bone names'),
+        ('manuel_bastioni_lab', 'Manuel Bastioni Lab', 'Manuel Bastioni Lab bone names'),
+        ('makehuman_mhx', 'MakeHuman MHX', 'MakeHuman MHX bone names'),
+        ('sims_3', 'Sims 3', 'Sims 3 bone names'),
+        ('doa5lr', 'DOA5LR', 'Dead or Alive 5 Last Round bone names'),
+        ('Bip_001', 'Bip001', 'Bip001 bone names'),
+        ('biped_3ds_max', 'Biped (3ds Max)', 'Biped 3DS Max bone names'),
+        ('biped_sfm', 'Biped (SFM)', 'Biped Source Film Maker bone names'),
+        ('valvebiped', 'ValveBiped', 'ValveBiped bone names'),
+        ('iClone7', 'iClone 7', 'iClone7 bone names')
     ]
 
-    # 注册骨骼类型选择属性
+    # 注册场景属性（供面板和逻辑调用）
     bpy.types.Scene.selected_armature_to_diagnose = bpy.props.EnumProperty(
         items=bone_type_items,
-        name="Target Bone Type",
-        default='mmd_english',  # 默认诊断 MMD 英文骨骼
-        description="Select the bone type to check for missing bones"
+        name="Armature Type",
+        description="Select the bone type to diagnose against",
+        default='mmd_english'  # 默认选中 MMD 英文骨骼
     )
 
 
-# --------------------------
-# 插件注册/注销（3.6 安全处理）
-# --------------------------
-def register():
-    """注册插件组件：属性 → 面板 → 操作器"""
-    # 1. 注册场景属性
-    try:
-        register_scene_properties()
-        print("✅ Armature Diagnostic: Scene properties registered")
-    except Exception as e:
-        print(f"⚠️ Armature Diagnostic: Failed to register properties - {str(e)}")
+def unregister_scene_properties():
+    """注销场景属性（避免 Blender 内存泄漏）"""
+    if hasattr(bpy.types.Scene, "selected_armature_to_diagnose"):
+        del bpy.types.Scene.selected_armature_to_diagnose
 
-    # 2. 注册 UI 面板和操作器
-    try:
-        bpy.utils.register_class(ArmatureDiagnosticPanel)
-        bpy.utils.register_class(ArmatureDiagnostic)
-        print("✅ Armature Diagnostic: UI and operator registered")
-    except Exception as e:
-        print(f"❌ Armature Diagnostic: Failed to register classes - {str(e)}")
+
+# ------------------------------
+# 5. 插件注册/注销入口（规范 Blender 插件生命周期）
+# ------------------------------
+def register():
+    """注册插件所有组件（面板、操作器、属性）"""
+    register_scene_properties()
+    bpy.utils.register_class(ArmatureDiagnosticPanel)
+    bpy.utils.register_class(ArmatureDiagnostic)
+    print("【Armature Diagnostic】插件注册完成！")
 
 
 def unregister():
-    """注销插件组件：避免残留"""
-    # 1. 注销操作器和面板
-    try:
-        bpy.utils.unregister_class(ArmatureDiagnostic)
-        bpy.utils.unregister_class(ArmatureDiagnosticPanel)
-        print("✅ Armature Diagnostic: UI and operator unregistered")
-    except Exception as e:
-        print(f"⚠️ Armature Diagnostic: Failed to unregister classes - {str(e)}")
-
-    # 2. 安全删除场景属性（避免 AttributeError）
-    try:
-        if hasattr(bpy.types.Scene, "selected_armature_to_diagnose"):
-            del bpy.types.Scene.selected_armature_to_diagnose
-            print("✅ Armature Diagnostic: Scene properties deleted")
-    except Exception as e:
-        print(f"⚠️ Armature Diagnostic: Failed to delete properties - {str(e)}")
+    """注销插件所有组件（反向顺序，避免依赖错误）"""
+    bpy.utils.unregister_class(ArmatureDiagnostic)
+    bpy.utils.unregister_class(ArmatureDiagnosticPanel)
+    unregister_scene_properties()
+    print("【Armature Diagnostic】插件注销完成！")
 
 
-# 直接运行时注册（测试用）
+# 直接运行脚本时注册插件（便于测试）
 if __name__ == "__main__":
     register()

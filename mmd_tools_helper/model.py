@@ -1,223 +1,194 @@
 import bpy
-import logging
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+print("model.py---")
 
-# --------------------------
-# 核心：确保属性注册（关键修复）
-# --------------------------
-def register_scene_properties():
-    # 仅在属性未注册时才注册，避免重复注册错误
-    if not hasattr(bpy.types.Scene, "selected_armature_to_diagnose"):
-        bpy.types.Scene.selected_armature_to_diagnose = bpy.props.PointerProperty(
-            name="待诊断骨骼",
-            type=bpy.types.Object,
-            poll=lambda self, obj: obj and obj.type == 'ARMATURE',  # 确保obj不为空
-            description="选择要诊断的MMD骨骼对象"
-        )
-
-def unregister_scene_properties():
-    if hasattr(bpy.types.Scene, "selected_armature_to_diagnose"):
-        del bpy.types.Scene.selected_armature_to_diagnose
-
-# --------------------------
-# 模型工具函数（纯读取，无任何修改）
-# --------------------------
 def findRoot(obj):
-    """查找根对象（仅读取）"""
-    if not obj:
+    """查找 MMD 模型的根对象（ROOT 类型）"""
+    if obj is not None:
+        if hasattr(obj, "mmd_type") and obj.mmd_type == 'ROOT':
+            return obj
+        else:
+            return findRoot(obj.parent)
+    else:
         return None
-    current = obj
-    while current.parent:
-        current = current.parent
-        if hasattr(current, 'mmd_type') and current.mmd_type == 'ROOT':
-            return current
-    # 检查自身是否为根
-    if hasattr(obj, 'mmd_type') and obj.mmd_type == 'ROOT':
-        return obj
-    return None
+
+def armature(root):
+    """从根对象的子对象中查找骨架（ARMATURE）"""
+    armatures = []
+    if root is None:
+        return None
+    for c in root.children:
+        if c.type == 'ARMATURE':
+            # 移除 hide_viewport 修改，避免上下文错误
+            armatures.append(c)
+    if len(armatures) == 1:
+        return armatures[0]
+    if len(armatures) == 0:
+        print("警告：未找到骨架对象")
+        return None
+    if len(armatures) > 1:
+        print(f"错误：找到多个骨架对象 {armatures}")
+        return None
+
+def __allObjects(obj):
+    """递归获取对象的所有子对象（内部辅助函数）"""
+    r = []
+    for child in obj.children:
+        r.append(child)
+        r += __allObjects(child)
+    return r
+
+def allObjects(obj, root):
+    """获取从指定对象（或根对象）开始的所有对象"""
+    if obj is None:
+        obj = root
+    return [obj] + __allObjects(obj)
+
+def meshes(root):
+    """从根对象中筛选出 MMD 网格（MESH 类型且 mmd_type 为 NONE）"""
+    arm = armature(root)
+    if arm is None:
+        return []
+    else:
+        return [
+            x for x in allObjects(arm, root) 
+            if x.type == 'MESH' and hasattr(x, "mmd_type") and x.mmd_type == 'NONE'
+        ]
+
+def find_MMD_Armature(obj):
+    """查找 MMD 模型的骨架（通过根对象）"""
+    root = findRoot(obj)
+    if root is None:
+        print('未选中任何 MMD 模型')
+    else:
+        return armature(root)
 
 def findArmature(obj):
-    """查找骨骼对象（纯读取，不修改任何属性）"""
-    if not obj:
-        return None
-    
-    # 情况1：自身就是骨骼
+    """从任意对象查找关联的骨架（支持多种对象类型）"""
+    # 若对象本身是骨架，直接返回
     if obj.type == 'ARMATURE':
-        return obj
-    
-    # 情况2：父对象是骨骼
-    if obj.parent and obj.parent.type == 'ARMATURE':
-        return obj.parent
-    
-    # 情况3：从根对象的子级中查找
-    root = findRoot(obj)
-    if root:
-        for child in root.children:  # 遍历子级（纯读取，无修改）
-            if child.type == 'ARMATURE':
-                return child
-    
-    # 情况4：从空对象的子级中查找
+        return obj  # 移除 hide_viewport 修改
+    # 若父对象是骨架，返回父对象
+    if obj.parent is not None and obj.parent.type == 'ARMATURE':
+        return obj.parent  # 移除 hide_viewport 修改
+    # 若对象是 MMD 根节点，从根节点查找骨架
+    if hasattr(obj, "mmd_type") and obj.mmd_type == 'ROOT':
+        return armature(obj)
+    # 若对象是空物体，尝试从空物体查找骨架
     if obj.type == 'EMPTY':
-        for child in obj.children:  # 遍历子级（纯读取，无修改）
-            if child.type == 'ARMATURE':
-                return child
-    
+        return armature(obj)
+    # 未找到骨架
+    print(f"警告：未从对象 {obj.name} 找到关联的骨架")
     return None
 
-def get_all_bones(armature_obj):
-    """获取所有骨骼名称（纯读取）"""
-    if not armature_obj or armature_obj.type != 'ARMATURE':
+def find_MMD_MeshesList(obj):
+    """查找 MMD 模型的所有网格（通过根对象）"""
+    root = findRoot(obj)
+    if root is None:
+        print('未选中任何 MMD 模型')
+    else:
+        return list(meshes(root))
+
+def findMeshesList(obj):
+    """从任意对象查找关联的网格列表"""
+    mesheslist = []
+    # 若对象是骨架，收集其所有子网格
+    if obj.type == 'ARMATURE':
+        for child in obj.children:
+            if child.type == 'MESH':
+                mesheslist.append(child)
+        return mesheslist
+    # 若对象是网格，查找其父骨架的所有子网格
+    if obj.type == 'MESH':
+        if obj.parent is not None and obj.parent.type == 'ARMATURE':
+            for child in obj.parent.children:
+                if child.type == 'MESH':
+                    mesheslist.append(child)
+            return mesheslist
+        # 若网格无父骨架，仅返回自身
+        return [obj]
+    # 若对象是 MMD 根节点，从根节点查找网格
+    if hasattr(obj, "mmd_type") and obj.mmd_type == 'ROOT':
+        return list(meshes(obj))
+    # 若对象是空物体，从空物体查找网格
+    if obj.type == 'EMPTY':
+        return list(meshes(obj))
+    # 未找到网格
+    return mesheslist
+
+def find_mmd_rigid_bodies_list(root):
+    """查找 MMD 模型的刚体列表（从 root 的子对象 "rigidbodies" 中）"""
+    if root is None:
+        print("错误：根对象为空，无法查找刚体")
         return []
-    return [bone.name for bone in armature_obj.data.bones]
+    # 查找名为 "rigidbodies" 的空对象
+    rigidbodies_empty = None
+    for child in root.children:
+        if child.type == 'EMPTY' and child.name == "rigidbodies":
+            rigidbodies_empty = child
+            break
+    if rigidbodies_empty is None:
+        print("警告：未找到名为 'rigidbodies' 的空对象")
+        return []
+    # 返回刚体空对象的所有子对象
+    return list(rigidbodies_empty.children)
 
-# --------------------------
-# 骨骼诊断逻辑
-# --------------------------
-class MMD_Armature_Diagnoser:
-    BASE_MMD_BONES = [
-        "センター", "上半身", "下半身", "頭", "首",
-        "左肩", "左腕", "左手", "左指",
-        "右肩", "右腕", "右手", "右指",
-        "左足", "左足首", "左足先",
-        "右足", "右足首", "右足先"
-    ]
+def find_mmd_joints_list(root):
+    """查找 MMD 模型的关节列表（从 root 的子对象 "joints" 中）"""
+    if root is None:
+        print("错误：根对象为空，无法查找关节")
+        return []
+    # 查找名为 "joints" 的空对象
+    joints_empty = None
+    for child in root.children:
+        if child.type == 'EMPTY' and child.name == "joints":
+            joints_empty = child
+            break
+    if joints_empty is None:
+        print("警告：未找到名为 'joints' 的空对象")
+        return []
+    # 返回关节空对象的所有子对象
+    return list(joints_empty.children)
+
+def test():
+    """测试函数：验证各功能是否正常工作"""
+    print("test---from model.py")
+    if not hasattr(bpy.context, "active_object") or bpy.context.active_object is None:
+        print("未选中任何对象，测试终止")
+        return
     
-    @classmethod
-    def diagnose(cls, armature_obj):
-        if not armature_obj or armature_obj.type != 'ARMATURE':
-            return {"error": "无效的骨骼对象"}
-        
-        current_bones = get_all_bones(armature_obj)
-        return {
-            "armature_name": armature_obj.name,
-            "total_bones": len(current_bones),
-            "missing_basic_bones": [b for b in cls.BASE_MMD_BONES if b not in current_bones],
-            "ik_bones": [b.name for b in armature_obj.data.bones if b.ik_constraint],
-            "has_ik": any(b.ik_constraint for b in armature_obj.data.bones),
-            "warning": ["骨骼数量异常少，可能不完整"] if len(current_bones) < 10 else []
-        }
+    active_obj = bpy.context.active_object
+    print(f"活跃对象类型：{active_obj.type}")
     
-    @classmethod
-    def print_diagnosis(cls, result):
-        if "error" in result:
-            logger.error(result["error"])
-            return
-        
-        print("\n===== MMD骨骼诊断结果 =====")
-        print(f"骨骼对象: {result['armature_name']}")
-        print(f"总骨骼数量: {result['total_bones']}")
-        
-        if result["missing_basic_bones"]:
-            print(f"\n缺失基础骨骼 ({len(result['missing_basic_bones'])}):")
-            for bone in result["missing_basic_bones"]:
-                print(f"  - {bone}")
-        else:
-            print("\n✓ 所有基础骨骼都存在")
-            
-        print(f"\nIK骨骼数量: {len(result['ik_bones'])}")
-        if result["ik_bones"]:
-            print("IK骨骼列表:")
-            for bone in result["ik_bones"]:
-                print(f"  - {bone}")
-                
-        if result["warning"]:
-            print("\n警告:")
-            for warn in result["warning"]:
-                print(f"  - {warn}")
-        print("\n===========================")
-
-# --------------------------
-# UI面板（纯绘制，不修改数据）
-# --------------------------
-class MMD_PT_Armature_Diagnose_Panel(bpy.types.Panel):
-    bl_idname = "MMD_PT_armature_diagnose"
-    bl_label = "MMD骨骼诊断工具"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'MMD工具'
-
-    def draw(self, context):
-        layout = self.layout
-        scene = context.scene
-        
-        # 检查属性是否存在（容错处理）
-        if not hasattr(scene, "selected_armature_to_diagnose"):
-            layout.label(text="属性未注册，请重新启用插件", icon='ERROR')
-            return
-        
-        box = layout.box()
-        box.label(text="骨骼选择", icon='ARMATURE_DATA')
-        box.prop(scene, "selected_armature_to_diagnose")
-        
-        box = layout.box()
-        box.label(text="诊断操作", icon='TOOL_SETTINGS')
-        box.operator("mmd.diagnose_armature", text="执行诊断", icon='CHECKMARK')
-        
-        if "diagnosis_result" in scene:
-            box = layout.box()
-            box.label(text="诊断状态", icon='INFO')
-            box.label(text=f"最后诊断: {scene['diagnosis_result'].get('armature_name', '无')}")
-
-# --------------------------
-# 操作符（唯一允许修改数据的上下文）
-# --------------------------
-class MMD_OT_Diagnose_Armature(bpy.types.Operator):
-    bl_idname = "mmd.diagnose_armature"
-    bl_label = "诊断骨骼"
-    bl_description = "诊断选中的MMD骨骼结构"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        scene = context.scene
-        
-        # 检查属性是否存在
-        if not hasattr(scene, "selected_armature_to_diagnose"):
-            self.report({'ERROR'}, "属性未注册，请重新安装插件")
-            return {'CANCELLED'}
-        
-        target_armature = scene.selected_armature_to_diagnose
-        if not target_armature or target_armature.type != 'ARMATURE':
-            self.report({'ERROR'}, "请选择有效的骨骼对象")
-            return {'CANCELLED'}
-        
-        # 尝试显示骨骼（仅在此处执行修改操作）
-        try:
-            target_armature.hide_viewport = False
-        except AttributeError:
-            self.report({'WARNING'}, "无法修改骨骼可见性，但诊断将继续")
-        
-        # 执行诊断
-        result = MMD_Armature_Diagnoser.diagnose(target_armature)
-        MMD_Armature_Diagnoser.print_diagnosis(result)
-        scene["diagnosis_result"] = result
-        
-        self.report({'INFO'}, f"诊断完成: {target_armature.name}")
-        return {'FINISHED'}
-
-# --------------------------
-# 插件注册/注销（确保属性优先注册）
-# --------------------------
-classes = (MMD_PT_Armature_Diagnose_Panel, MMD_OT_Diagnose_Armature)
-
-def register():
-    # 1. 优先注册属性
-    register_scene_properties()
-    # 2. 注册UI和操作符
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    logger.info("插件注册完成")
-
-def unregister():
-    # 1. 注销UI和操作符
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    # 2. 最后注销属性
-    unregister_scene_properties()
-    logger.info("插件注销完成")
-
-if __name__ == "__main__":
-    register()
+    # 测试根对象查找
+    root = findRoot(active_obj)
+    print(f"根对象：{root.name if root else 'None'}")
     
+    # 测试 MMD 网格列表查找
+    mmd_meshes = find_MMD_MeshesList(active_obj)
+    print(f"MMD 网格列表：{[m.name for m in mmd_meshes]}")
+    
+    # 测试 MMD 骨架查找
+    mmd_armature = find_MMD_Armature(active_obj)
+    print(f"MMD 骨架：{mmd_armature.name if mmd_armature else 'None'}\n")
+    
+    # 测试通用网格列表查找
+    meshes = findMeshesList(active_obj)
+    print(f"通用网格列表：{[m.name for m in meshes]}")
+    
+    # 测试通用骨架查找
+    armature = findArmature(active_obj)
+    print(f"通用骨架：{armature.name if armature else 'None'}\n")
+    
+    # 测试刚体和关节查找（仅当根对象存在时）
+    if root:
+        rigid_bodies = find_mmd_rigid_bodies_list(root)
+        print(f"刚体列表：{[rb.name for rb in rigid_bodies]}")
+        
+        joints = find_mmd_joints_list(root)
+        print(f"关节列表：{[j.name for j in joints]}\n")
+    else:
+        print("根对象不存在，跳过刚体和关节测试")
+
+# 取消注释可运行测试
+# test()
